@@ -452,7 +452,9 @@
     win.hidden = false;
     document.body.classList.add('settings-open');
     chip.setAttribute('aria-expanded', 'true');
-    timeField.focus();
+    // (the window takes the focus, not the date field: on an iPhone that opens the date wheel at once)
+    winCard.tabIndex = -1;
+    winCard.focus({ preventScroll: true });
   }
   function closeTime() {
     if (win.hidden) return;

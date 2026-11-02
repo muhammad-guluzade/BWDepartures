@@ -1,8 +1,10 @@
 // How a stop's departures are shown: by platform (as always), by time (one
 // list, soonest first), or "My direction first" (the platforms of the way the
-// visitor goes at the top). The view, and the direction chosen at each stop,
-// are kept in this browser (each device has its own); if the browser keeps
-// nothing (a private window, blocked site data), as long as the page is open.
+// visitor goes at the top). By platform / by time is one choice for every stop;
+// "My direction first" belongs to the stop (and tab) where a direction was
+// chosen, and only there (the user's rule, 2 November 2026). Both are kept in
+// this browser (each device has its own); if the browser keeps nothing (a
+// private window, blocked site data), as long as the page is open.
 // The button by the stop's name opens the small menu made here; departures.js
 // draws the board accordingly ('view-changed').
 (function () {
@@ -29,46 +31,78 @@
     try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* kept in memory only */ }
   }
 
-  function view() {
+  // the view of every stop that has no direction in use: 'platform' or 'time'
+  // (a 'direction' stored by the first version counts as 'platform')
+  function shared() {
     const stored = read(VIEW);
-    return VIEWS.includes(stored) ? stored : 'platform';
-  }
-  function setView(name) {
-    if (!VIEWS.includes(name)) return;
-    write(VIEW, name);
-    document.dispatchEvent(new CustomEvent('view-changed'));
+    return stored === 'time' ? 'time' : 'platform';
   }
 
-  // {"<stop id>|<tab>": [next stops]}: a direction is remembered by the next
-  // stops of its departures (the API's `next_stops`), not by platform numbers,
-  // which can change from one day to the next
+  // {"<stop id>|<tab>": {stops: [next stops], on: true|false}}: a direction is
+  // remembered by the next stops of its departures (the API's `next_stops`), not
+  // by platform numbers, which can change from one day to the next; `on` says
+  // whether the stop shows "My direction first" now (switched to another view,
+  // the direction stays remembered for going back)
+  const placeOf = (stopId, tab) => `${stopId}|${tab || ''}`;
+  const isStops = v => Array.isArray(v) && v.length > 0 && v.every(x => typeof x === 'string');
   function chosenAll() {
     const stored = read(DIRECTIONS);
-    return stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+    const all = {};
+    const oldView = read(VIEW) === 'direction';   // the first version: one view for all stops
+    Object.entries(stored).forEach(([place, v]) => {
+      if (isStops(v)) all[place] = { stops: v, on: oldView };
+      else if (v && isStops(v.stops)) all[place] = { stops: v.stops, on: v.on === true };
+    });
+    return all;
   }
-  const placeOf = (stopId, tab) => `${stopId}|${tab || ''}`;
+  function saved(stopId, tab) {
+    return chosenAll()[placeOf(stopId, tab)] || null;
+  }
+  // the chosen next stops while this stop shows "My direction first", else null
   function direction(stopId, tab) {
-    const stops = chosenAll()[placeOf(stopId, tab)];
-    return Array.isArray(stops) && stops.length && stops.every(s => typeof s === 'string') ? stops : null;
+    const entry = saved(stopId, tab);
+    return entry && entry.on ? entry.stops : null;
   }
+  // the view at this stop and tab
+  function view(stopId, tab) {
+    return stopId !== undefined && direction(stopId, tab) ? 'direction' : shared();
+  }
+  function store(all) {
+    const places = Object.keys(all);
+    places.slice(0, Math.max(0, places.length - KEPT)).forEach(p => delete all[p]);
+    write(DIRECTIONS, all);
+    if (read(VIEW) === 'direction') write(VIEW, 'platform');
+    document.dispatchEvent(new CustomEvent('view-changed'));
+  }
+  // By platform / By time, chosen at a stop: for every stop; this stop leaves
+  // "My direction first" (its direction stays remembered)
+  function setView(name, stopId, tab) {
+    if (name !== 'platform' && name !== 'time') return;
+    write(VIEW, name);
+    const all = chosenAll();
+    const entry = stopId !== undefined && all[placeOf(stopId, tab)];
+    if (entry) entry.on = false;
+    store(all);
+  }
+  // a direction chosen at a stop: this stop shows it first, the others are not affected
   function choose(stopId, tab, nextStops) {
     const all = chosenAll();
     const place = placeOf(stopId, tab);
     delete all[place];           // (to the end: the newest)
-    all[place] = nextStops.slice();
-    const places = Object.keys(all);
-    places.slice(0, Math.max(0, places.length - KEPT)).forEach(p => delete all[p]);
-    write(DIRECTIONS, all);
-    document.dispatchEvent(new CustomEvent('view-changed'));
+    all[place] = { stops: nextStops.slice(), on: true };
+    store(all);
   }
   // another tab of this site changed them
   window.addEventListener('storage', (e) => {
     if (e.key === VIEW || e.key === DIRECTIONS) document.dispatchEvent(new CustomEvent('view-changed'));
   });
 
-  // the direction of a board that the chosen next stops belong to, or null
+  // the direction of a board that the remembered next stops belong to (in use
+  // or not), or null
   function chosenOf(data) {
-    const stops = direction(data.stop.id, data.tab);
+    const entry = saved(data.stop.id, data.tab);
+    const stops = entry && entry.stops;
     if (!stops || !Array.isArray(data.directions)) return null;
     return data.directions.find(d => d.next_stops.some(s => stops.includes(s))) || null;
   }
@@ -154,7 +188,7 @@
     const { data } = shownFor;
     title.textContent = 'Show departures';
     body.innerHTML = '';
-    const current = view();
+    const current = view(data.stop.id, data.tab);
     VIEWS.forEach(name => {
       const option = el('button', name === current ? 'view-opt on' : 'view-opt');
       option.type = 'button';
@@ -163,17 +197,17 @@
       option.appendChild(el('span', `view-icon view-${name}`));
       const text = el('span', 'view-opt-text');
       text.appendChild(el('b', '', VIEW_TEXT[name][0]));
-      const chosen = name === 'direction' && chosenOf(data);
+      const chosen = name === 'direction' && current === 'direction' && chosenOf(data);
       text.appendChild(el('small', '', chosen ? `Towards ${directionName(chosen)}` : VIEW_TEXT[name][1]));
       option.appendChild(text);
       if (name === current) option.appendChild(el('span', 'view-check', '✓'));
       option.onclick = () => {
+        // (a direction is chosen in the next step; only then does this stop show it first)
         if (name === 'direction') {
-          if (current !== 'direction') setView('direction');
           showDirections();
           return;
         }
-        setView(name);
+        setView(name, data.stop.id, data.tab);
         closeMenu();
       };
       body.appendChild(option);

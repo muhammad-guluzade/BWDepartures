@@ -818,6 +818,7 @@ function renderStation(data) {
     stationBox.appendChild(nearby);
   }
 
+  placeTabSelect(data);
   if (data.tabs.length > 1) {
     const tabs = el('div', 'tabs');
     data.tabs.forEach(tab => {
@@ -1185,7 +1186,7 @@ function renderBoard(data) {
 
   // the view chosen with the button by the stop's name (views.js); a
   // favourite's one platform is shown as it is
-  const view = onlyPlatform ? 'platform' : window.views.view();
+  const view = onlyPlatform ? 'platform' : window.views.view(data.stop.id, data.tab);
   if (view === 'time') {
     board.appendChild(renderTimeList(data));
     return;
@@ -1274,20 +1275,60 @@ function platformBox(platform) {
   return box;
 }
 
+// On phones and tablets the kinds of transport are a dropdown (the user's
+// design, 2 November 2026), at the start of the time's row: inside the time
+// bar, so that a longer chosen time can never cover it (style.css shows either
+// the dropdown or the tabs). One element for the page's life: a refresh only
+// updates it, so a picker that is open stays open.
+const tabSelect = el('select', 'tab-select');
+tabSelect.setAttribute('aria-label', 'Kind of transport');
+tabSelect.onchange = () => selectTab(tabSelect.value);
+
+function placeTabSelect(data) {
+  const bar = document.getElementById('when-bar');
+  if (data.tabs.length < 2) {
+    tabSelect.remove();
+    return;
+  }
+  const options = data.tabs.map(tab => `${tab.id}=${tab.name}`).join('|');
+  if (tabSelect.dataset.options !== options) {
+    tabSelect.dataset.options = options;
+    tabSelect.innerHTML = '';
+    data.tabs.forEach(tab => {
+      const option = el('option', '', tab.name);
+      option.value = tab.id;
+      tabSelect.appendChild(option);
+    });
+  }
+  if (document.activeElement !== tabSelect) tabSelect.value = data.tab;
+  if (tabSelect.parentNode !== bar) bar.prepend(tabSelect);
+  fitTabSelect();
+}
+
+// a dropdown is as wide as its longest choice ("U-Bahn / Tram"): this one is as
+// wide as the one chosen ("Trains"), plus room for its arrow (it can still shrink)
+function fitTabSelect() {
+  const style = getComputedStyle(tabSelect);
+  if (style.display === 'none') return;
+  const chosen = tabSelect.options[tabSelect.selectedIndex];
+  const ruler = fitTabSelect.ruler || (fitTabSelect.ruler = document.createElement('canvas').getContext('2d'));
+  ruler.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const text = chosen ? ruler.measureText(chosen.textContent).width : 0;
+  tabSelect.style.width = Math.ceil(text + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) + 2) + 'px';
+}
+tabSelect.addEventListener('change', fitTabSelect);
+window.addEventListener('resize', fitTabSelect);
+
 // the button by the stop's name: its picture says which view is shown, filled
-// in when it is not the usual one; a dot while "My direction first" waits for
-// a direction at this stop
+// in when it is not the usual one
 const VIEW_NAMES = { platform: 'By platform', time: 'By time', direction: 'My direction first' };
 
 function viewButton(data) {
-  const view = window.views.view();
+  const view = window.views.view(data.stop.id, data.tab);
   const button = el('button', `view-button view-${view}`);
   button.type = 'button';
   if (view !== 'platform') button.classList.add('active');
-  const waiting = view === 'direction' && Array.isArray(data.directions) && data.directions.length > 1
-    && !window.views.chosenOf(data);
-  if (waiting) button.classList.add('waiting');
-  button.title = `Departures: ${VIEW_NAMES[view]}${waiting ? ' (choose your direction)' : ''}`;
+  button.title = `Departures: ${VIEW_NAMES[view]}`;
   button.setAttribute('aria-label', button.title);
   button.setAttribute('aria-haspopup', 'dialog');
   button.onclick = (e) => {

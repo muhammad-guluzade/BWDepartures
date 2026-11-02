@@ -101,7 +101,10 @@
     win.hidden = false;
     document.body.classList.add('settings-open');
     chip.setAttribute('aria-expanded', 'true');
-    field.focus();
+    // the window itself takes the focus, not the date field: on an iPhone a focused date
+    // field opens the system's date wheel at once; it opens when the field is tapped
+    card.tabIndex = -1;
+    card.focus({ preventScroll: true });
   }
 
   function close() {
