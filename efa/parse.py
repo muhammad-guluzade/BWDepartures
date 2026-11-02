@@ -473,6 +473,36 @@ def next_stop(event: dict) -> str | None:
     return None
 
 
+def stops_ahead(event: dict, importance: dict | None = None, horizon: int = 12) -> list:
+    """The stops one departure calls at next, up to and including its signed
+    destination, as [(name, importance)] in travel order, at most `horizon`
+    of them: what the direction a departure leaves in is named by (see
+    services.departures.directions). What counts as a stop, and where the
+    trip ends, follows `via_stops`; unlike there, the destination is kept."""
+    importance = importance or {}
+    here = event.get("location") or {}
+    here_name = station_of(here).get("name")
+    city = locality(here)
+    transportation = event.get("transportation") or {}
+    mode = mode_group(transportation)
+    signed = (transportation.get("destination") or {}).get("name") or ""
+    destination = short_name(signed, city)
+
+    stops = []
+    for o in event.get("onwardLocations") or []:
+        name = onward_name(o)
+        if not name or name == here_name or not_on_the_way(o, name, mode):
+            continue
+        short = short_name(name, city)
+        if any(short == n for n, _ in stops):
+            continue
+        known = importance.get(station_of(o).get("id"))
+        stops.append((short, estimated_importance(o) if known is None else known))
+        if len(stops) >= horizon or (signed and (name == signed or short == destination)):
+            break
+    return stops
+
+
 def via_stops(event: dict, importance: dict | None = None, horizon: int = 8, count: int = 2) -> list:
     """Major stops one departure calls at next, e.g. U6 to Gerlingen from
     Pragfriedhof -> ['Pragsattel', 'Feuerbach Bf'].
@@ -682,6 +712,8 @@ def parse_departure(event: dict, now: datetime | None = None, importance: dict |
         # moved to another platform today; the id still is the planned one's
         "platform_moved": bool(signposted) and (properties.get("plannedPlatformName") or signposted).strip() != signposted,
         "next_stop": next_stop(event),
+        # the stops after this one with their importance, to name directions by
+        "ahead": stops_ahead(event, importance),
         # where the trip ends (its last station's id; None: no stop after this
         # one) and the destination as EFA names it: to tell two timetables'
         # copies of one train apart (`dedupe`), and a train ending here

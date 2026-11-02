@@ -803,6 +803,8 @@ function renderStation(data) {
     };
     name.appendChild(fromHere);
   }
+  // how the departures are shown (views.js): by platform, by time, my direction first
+  if (data.modes.length) name.appendChild(viewButton(data));
   stationBox.appendChild(name);
 
   // when the board is empty, or only has departures days ahead, the nearby
@@ -1001,7 +1003,7 @@ function renderStops() {
   return row;
 }
 
-function renderDeparture(dep, mode, platform) {
+function renderDeparture(dep, mode, platform, withPlatform = false) {
   const row = el('tr', dep.cancelled ? 'cancelled' : '');
   row.classList.add('departure');
   row.dataset.id = dep.id;
@@ -1035,6 +1037,7 @@ function renderDeparture(dep, mode, platform) {
     when.appendChild(time);
     const day = dayLabel(dep);
     if (day) when.appendChild(el('div', 'clock', day));
+    if (withPlatform) appendPlatformBox(when, platform);
     row.appendChild(when);
     return row;
   }
@@ -1046,8 +1049,17 @@ function renderDeparture(dep, mode, platform) {
   if (dep.cancelled) clock.appendChild(el('s', '', formatTime(dep.planned || dep.time)));
   else fillTime(clock, dep);
   when.appendChild(clock);
+  if (withPlatform) appendPlatformBox(when, platform);
   row.appendChild(when);
   return row;
+}
+
+function appendPlatformBox(cell, platform) {
+  const box = platformBox(platform);
+  if (!box) return;
+  const line = el('div', 'platform-line');
+  line.appendChild(box);
+  cell.appendChild(line);
 }
 
 // 45 -> "45 min", 167 -> "2 h 47 min", 3269 -> "2 d 6 h"
@@ -1058,7 +1070,7 @@ function formatWait(minutes) {
 }
 
 // `departures`: the ones to show (the line filter may leave some out)
-function renderPlatform(mode, platform, departures = platform.departures) {
+function renderPlatform(mode, platform, departures = platform.departures, yours = false) {
   const block = el('div', 'platform-block');
   const key = platformKey(mode, platform);
   const marked = key === markedPlatform;
@@ -1066,6 +1078,12 @@ function renderPlatform(mode, platform, departures = platform.departures) {
   if (!mode.flat) {
     // the heading shows the platform on the map; its hint text is in the stylesheet
     const title = el('div', marked ? 'platform-title marked' : 'platform-title', platform.name);
+    // "your way" (the text is in the stylesheet, so the heading's text stays the platform's name)
+    if (yours) {
+      const label = el('span', 'your-way');
+      label.title = 'Goes your way';
+      title.appendChild(label);
+    }
     title.title = marked ? 'Take the mark off the map' : 'Show this platform on the map';
     title.onclick = () => {
       if (marked) clearPlatformMark();
@@ -1165,19 +1183,130 @@ function renderBoard(data) {
 
   if (onlyPlatform) board.appendChild(onlyPlatformBar(data));
 
+  // the view chosen with the button by the stop's name (views.js); a
+  // favourite's one platform is shown as it is
+  const view = onlyPlatform ? 'platform' : window.views.view();
+  if (view === 'time') {
+    board.appendChild(renderTimeList(data));
+    return;
+  }
+  const chosen = view === 'direction' ? window.views.direction(data.stop.id, data.tab) : null;
+
   // modes and platforms within them already arrive pre-sorted from the backend
+  const sections = [];
   data.modes.forEach(mode => {
-    const platforms = mode.platforms
+    let platforms = mode.platforms
       .filter(platform => !onlyPlatform || onlyPlatformIs(mode, platform, data))
       .map(platform => [platform, platform.departures.filter(dep => linePicked(dep, mode))])
       .filter(([, departures]) => departures.length);
     if (!platforms.length) return;
+    if (chosen) platforms = yoursFirst(platforms, chosen);
     const section = el('div', 'mode-section');
     section.appendChild(el('div', `mode-header mode-${mode.id}`, mode.name));
-    platforms.forEach(([platform, departures]) => section.appendChild(renderPlatform(mode, platform, departures)));
-    board.appendChild(section);
+    platforms.forEach(([platform, departures, yours]) => section.appendChild(renderPlatform(mode, platform, departures, yours)));
+    sections.push([section, platforms.some(([, , yours]) => yours)]);
   });
+  // ... and the kinds of transport going that way before the others
+  sections.sort((a, b) => b[1] - a[1]).forEach(([section]) => board.appendChild(section));
 }
+
+// "My direction first": the platforms with a departure in the chosen
+// direction (by their next stops) first, the one whose next departure that
+// way leaves soonest at the top; the others after them, in their own order.
+// [[platform, departures]] -> [[platform, departures, yours]]
+function yoursFirst(platforms, nextStops) {
+  const soonest = departures => departures
+    .filter(dep => !dep.cancelled && dep.next_stop && nextStops.includes(dep.next_stop))
+    .reduce((first, dep) => (first === null || dep.time < first ? dep.time : first), null);
+  const marked = platforms.map(([platform, departures]) => [platform, departures, soonest(departures)]);
+  const yours = marked.filter(entry => entry[2] !== null).sort((a, b) => (a[2] < b[2] ? -1 : a[2] > b[2] ? 1 : 0));
+  const others = marked.filter(entry => entry[2] === null);
+  return [...yours.map(([p, d]) => [p, d, true]), ...others.map(([p, d]) => [p, d, false])];
+}
+
+// "By time": the departures of the tab in one list, soonest first, each with
+// its platform; twenty at first, ten more per "Show more"
+const TIME_LIST_FIRST = 20;
+
+function renderTimeList(data) {
+  const rows = [];
+  data.modes.forEach(mode => mode.platforms.forEach(platform => platform.departures.forEach(dep => {
+    if (linePicked(dep, mode)) rows.push([dep, mode, platform]);
+  })));
+  // (a stable sort: two departures at the same moment keep the board's order)
+  rows.sort((a, b) => (a[0].time < b[0].time ? -1 : a[0].time > b[0].time ? 1 : 0));
+  const section = el('div', 'mode-section time-list');
+  if (!rows.length) return section;
+  const kinds = new Set(rows.map(([, mode]) => mode.id));
+  section.appendChild(kinds.size === 1 ? el('div', `mode-header mode-${rows[0][1].id}`, rows[0][1].name)
+    : el('div', 'mode-header', 'All departures'));
+  // the marked platform stays marked while it has departures in the list
+  if (rows.some(([, mode, platform]) => platformKey(mode, platform) === markedPlatform)) markShown = true;
+
+  const block = el('div', 'platform-block');
+  const key = `time|${data.tab || ''}`;
+  const count = Math.min(shownCount.get(key) || TIME_LIST_FIRST, rows.length);
+  const table = el('table');
+  rows.slice(0, count).forEach(([dep, mode, platform]) => {
+    table.appendChild(renderDeparture(dep, mode, platform, true));
+    if (dep.id === openDeparture && !openShown) {
+      openShown = true;
+      table.appendChild(renderStops());
+    }
+  });
+  block.appendChild(table);
+  const hidden = rows.length - count;
+  if (hidden > 0) {
+    const more = el('button', 'show-more', `Show ${Math.min(PER_PLATFORM, hidden)} more`);
+    more.onclick = () => { shownCount.set(key, count + PER_PLATFORM); render(); };
+    block.appendChild(more);
+  }
+  section.appendChild(block);
+  return section;
+}
+
+// the platform in a row of the time list: "Pl. 12" (the full name on hover)
+function platformBox(platform) {
+  const code = platform.code || (/^Platform (\S+)/.exec(platform.name) || [])[1];
+  if (!code) return null;
+  const box = el('span', 'platform-box', `Pl. ${code}`);
+  box.title = platform.name;
+  return box;
+}
+
+// the button by the stop's name: its picture says which view is shown, filled
+// in when it is not the usual one; a dot while "My direction first" waits for
+// a direction at this stop
+const VIEW_NAMES = { platform: 'By platform', time: 'By time', direction: 'My direction first' };
+
+function viewButton(data) {
+  const view = window.views.view();
+  const button = el('button', `view-button view-${view}`);
+  button.type = 'button';
+  if (view !== 'platform') button.classList.add('active');
+  const waiting = view === 'direction' && Array.isArray(data.directions) && data.directions.length > 1
+    && !window.views.chosenOf(data);
+  if (waiting) button.classList.add('waiting');
+  button.title = `Departures: ${VIEW_NAMES[view]}${waiting ? ' (choose your direction)' : ''}`;
+  button.setAttribute('aria-label', button.title);
+  button.setAttribute('aria-haspopup', 'dialog');
+  button.onclick = (e) => {
+    e.stopPropagation();   // (not the bar's "a tap opens the sheet")
+    window.views.openMenu(button, data, line => {
+      const mode = { id: line.mode };
+      return el('span', badgeClass({ brand: line.brand }, mode), chipOf({ line: line.line }, mode));
+    });
+  };
+  return button;
+}
+
+// another view (or direction): the list is drawn anew from its top, where what
+// was asked for now is (a redraw otherwise keeps the departures in sight in place)
+document.addEventListener('view-changed', () => {
+  if (!lastData || !Array.isArray(lastData.modes)) return;
+  render();
+  panelBox.scrollTop = 0;
+});
 
 // A picked line that has no departure in the list any more (its last one has
 // left) loses its chip and leaves the choice; with none left, every line shows.

@@ -259,7 +259,7 @@ def take_longer_route(kept: dict, copy: dict) -> None:
     if len(long) <= len(short) or long[:len(short)] != short:
         return
     kept.update(destination=copy["destination"], via=copy["via"], last_station=copy.get("last_station"),
-                destination_full=copy.get("destination_full"))
+                destination_full=copy.get("destination_full"), ahead=copy.get("ahead", kept.get("ahead")))
     remember_trip({**mine[1], "destination": copy["destination"], "onward": theirs[1]["onward"]})
 
 
@@ -290,7 +290,7 @@ def departing(departures: list, station: dict) -> list:
 SAME_SPOT_METRES = 5
 # what a departure row carries only for the grouping
 PLATFORM_FIELDS = ("mode", "platform", "platform_code", "platform_area", "platform_id", "platform_lat", "platform_lon",
-                   "platform_named", "platform_moved", "next_stop", "last_station", "destination_full")
+                   "platform_named", "platform_moved", "ahead", "last_station", "destination_full")
 
 
 def metres(a: tuple, b: tuple) -> float:
@@ -408,6 +408,8 @@ def group_departures(departures: list) -> list:
             for row in rows:
                 for field in PLATFORM_FIELDS:
                     row.pop(field, None)
+                # public, at the end of the row (it was added to v1 later)
+                row["next_stop"] = row.pop("next_stop", None)
             platforms.append({
                 "code": code,
                 "name": name,
@@ -422,6 +424,85 @@ def group_departures(departures: list) -> list:
         # fewer than 2 distinct platforms within this mode -> flat list
         modes.append({"id": parse.slug(mode), "name": mode, "flat": len(platforms) < 2, "platforms": platforms})
     return modes
+
+
+# Directions: the ways the departures of a board leave the stop. A direction is
+# the next stop, named by the most important stops further on; directions
+# leaving from exactly the same platforms are one (sorting by them would be
+# the same). The page puts the platforms of the direction a visitor chose first.
+TOWARDS_COUNT = 2
+
+
+def direction_name(rows: list, ahead: dict) -> list:
+    """The stops a direction is named by: the most important ones its
+    departures call at soon, weighted by how many of them call there
+    ("Hauptbahnhof", "Charlottenplatz" from Pragfriedhof's platform 1). On
+    city lines the second is not the first one's neighbour (as with via
+    stops); trains and coaches name their two biggest stops."""
+    seen = {}  # name -> [count, importance, sum of positions]
+    for dep, _mode, _platform in rows:
+        for position, (name, importance) in enumerate(ahead.get(dep["id"]) or []):
+            entry = seen.setdefault(name, [0, importance, 0])
+            entry[0] += 1
+            entry[1] = max(entry[1], importance)
+            entry[2] += position
+    if not seen:
+        return []
+    total = len(rows)
+    score = {name: imp * math.sqrt(n / total) for name, (n, imp, _) in seen.items()}
+    place = {name: pos / n for name, (n, _, pos) in seen.items()}
+    ranked = sorted(seen, key=lambda name: (-score[name], place[name], name))
+    far_apart = all(mode["name"] in parse.FAR_APART_MODES or mode["name"] == TRAINS for _, mode, _ in rows)
+    picked = [ranked[0]]
+    for name in ranked[1:]:
+        if len(picked) == TOWARDS_COUNT:
+            break
+        if far_apart or abs(place[name] - place[picked[0]]) >= 1.5:
+            picked.append(name)
+    return sorted(picked, key=lambda name: place[name])
+
+
+def directions(modes: list, ahead: dict) -> list:
+    """[{next_stops, towards, lines: [{line, mode, brand}], platforms, departures}]
+    for a grouped board (`group_departures`), the busiest first. `ahead` is
+    {departure id: [(name, importance)]} (`parse.stops_ahead`)."""
+    by_next = {}
+    for mode in modes:
+        for platform in mode["platforms"]:
+            for dep in platform["departures"]:
+                if dep.get("next_stop"):
+                    by_next.setdefault(dep["next_stop"], []).append((dep, mode, platform))
+    same_platforms = {}
+    for next_stop, rows in by_next.items():
+        key = frozenset((mode["id"], platform["name"]) for _, mode, platform in rows)
+        same_platforms.setdefault(key, []).append(next_stop)
+
+    # ... and two that are named alike are one for the visitor (the RE6 and
+    # the RE6a leave Stuttgart Hbf two ways, both "Reutlingen · Tübingen")
+    named = {}
+    for next_stops in same_platforms.values():
+        rows = [row for next_stop in next_stops for row in by_next[next_stop]]
+        name = direction_name(rows, ahead)
+        entry = named.setdefault(tuple(name) or tuple(next_stops), [name, [], []])
+        entry[1] += next_stops
+        entry[2] += rows
+
+    order = {(mode["id"], platform["name"]): i for i, (mode, platform) in
+             enumerate((m, p) for m in modes for p in m["platforms"])}
+    found = []
+    for name, next_stops, rows in named.values():
+        lines = Counter((dep["line"], mode["id"], dep.get("brand")) for dep, mode, _ in rows)
+        places = {(mode["id"], platform["name"]) for _, mode, platform in rows}
+        found.append({
+            "next_stops": sorted(next_stops),
+            "towards": name,
+            "lines": [{"line": line, "mode": mode_id, "brand": brand}
+                      for (line, mode_id, brand), _ in sorted(lines.items(), key=lambda item: (-item[1], item[0][0]))],
+            # (once each: regional and long-distance trains can share a "Platform 2")
+            "platforms": list(dict.fromkeys(platform for _, platform in sorted(places, key=lambda k: order[k]))),
+            "departures": len(rows),
+        })
+    return sorted(found, key=lambda d: (-d["departures"], d["towards"], d["next_stops"]))
 
 
 def has_departures(stop_id: str, classes, start: datetime | None = None) -> bool:
@@ -539,6 +620,7 @@ def platform_board(station: dict, nearby: list, platform_id: str, trains_togethe
     if trains_together:
         put_trains_together(departures)
     heading = towards(departures)
+    ahead = {dep["id"]: dep.get("ahead") or [] for dep in departures}
     modes = group_departures(departures)
     shown = modes[0]["platforms"][0] if modes else known_platform(platform_id)
     code = shown.get("code")
@@ -559,6 +641,7 @@ def platform_board(station: dict, nearby: list, platform_id: str, trains_togethe
             "towards": heading if modes else shown.get("towards", []),
         },
         "when": when_text(start),
+        "directions": directions(modes, ahead),
     }
 
 
@@ -609,7 +692,8 @@ def board(stop_id: str, tab_id: str = "", platform_id: str = "", trains_together
         # before or after the timetable the timetable service has: nothing
         # to look for, here or next door
         return {"stop": public_stop(station), "nearby": [public_stop(n) for n in nearby], "tabs": [], "tab": None,
-                "modes": [], "empty": EMPTY_NO_TIMETABLE, "next_service": None, "platform": None, "when": when_text(start)}
+                "modes": [], "empty": EMPTY_NO_TIMETABLE, "next_service": None, "platform": None, "when": when_text(start),
+                "directions": []}
     if not departures:
         departures = departing(later_departures(station["id"], start), station)
         times = [dep["time"] for dep in departures if dep["time"]]
@@ -630,15 +714,18 @@ def board(stop_id: str, tab_id: str = "", platform_id: str = "", trains_together
         nearby = [public_stop(n) for n in nearby]
     if trains_together:
         put_trains_together(departures)
+    ahead = {dep["id"]: dep.get("ahead") or [] for dep in departures}
+    modes = group_departures(departures)
 
     return {
         "stop": public_stop(station),
         "nearby": nearby,
         "tabs": [{"id": t["id"], "name": t["name"]} for t in tabs],
         "tab": tab["id"] if tab else None,
-        "modes": group_departures(departures),
+        "modes": modes,
         "empty": empty,
         "next_service": next_service,
         "platform": None,
         "when": when_text(start),
+        "directions": directions(modes, ahead),
     }

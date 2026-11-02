@@ -740,8 +740,8 @@ class PlatformPlaceTest(unittest.TestCase):
         self.assertEqual((second["lat"], second["lon"]), self.north(17))
         self.assertEqual((len(first["departures"]), len(second["departures"])), (5, 4))
         self.assertEqual((first["code"], first["area"], second["code"], second["area"]), ("1", None, "1", None))
-        # nothing of the bookkeeping reaches the rows
-        self.assertEqual(set(first["departures"][0]), {"id", "minutes", "time", "line"})
+        # nothing of the bookkeeping reaches the rows (the next stop is a public field)
+        self.assertEqual(set(first["departures"][0]), {"id", "minutes", "time", "line", "next_stop"})
 
     def test_a_departure_with_only_the_stations_id_joins_its_platform(self):
         # Wiesloch-Walldorf: one S2 came with the station's id, 8.5 m from platform 2 itself
@@ -837,6 +837,111 @@ class PlatformPlaceTest(unittest.TestCase):
         # the end of the line, and a list that starts with this station again
         self.assertIsNone(parse.parse_departure(event({"platform": "2"}, onward_stops=()))["next_stop"])
         self.assertEqual(parse.next_stop(event({}, onward_stops=("Pragfriedhof", "Heidelberg, Post Waypoint", "Killesberg"))), "Killesberg")
+
+
+class DirectionsTest(unittest.TestCase):
+    """The ways the departures of a board leave the stop, for "My direction
+    first" (the importance numbers are made up)."""
+
+    def dep(self, n, platform, next_stop, ahead, line="U6", mode="U-Bahn / Tram", brand=None):
+        return {"id": f"d{n}", "mode": mode, "platform": platform, "platform_code": platform.replace("Platform ", ""),
+                "platform_area": "", "platform_id": None, "platform_lat": None, "platform_lon": None,
+                "platform_named": True, "platform_moved": False, "next_stop": next_stop, "ahead": ahead,
+                "time": in_minutes(n), "minutes": n, "line": line, "brand": brand}
+
+    def directions(self, deps):
+        ahead = {dep["id"]: dep["ahead"] for dep in deps}
+        return departures.directions(group_departures(deps), ahead)
+
+    # Pragfriedhof: platform 1 into the city, platform 2 out (two next stops: the U5 turns off to Killesberg)
+    CITY = [("Stadtbibliothek", 17.9), ("Hauptbahnhof", 30.0), ("Schlossplatz", 24.3), ("Charlottenplatz", 28.2)]
+    OUT = [("Löwentorbrücke", 15.5), ("Pragsattel", 19.0), ("Maybachstraße", 6.1), ("Feuerbach Bf", 23.3)]
+    U5 = [("Killesberg", 12.0)]
+
+    def pragfriedhof(self):
+        return ([self.dep(n, "Platform 1", "Stadtbibliothek", self.CITY, line=line) for n, line in enumerate(["U5", "U6", "U7", "U6"])]
+                + [self.dep(10 + n, "Platform 2", "Löwentorbrücke", self.OUT, line=line) for n, line in enumerate(["U6", "U7", "U6"])]
+                + [self.dep(20, "Platform 2", "Killesberg", self.U5, line="U5")])
+
+    def test_one_direction_per_way_out_named_by_major_stops(self):
+        found = self.directions(self.pragfriedhof())
+        self.assertEqual([d["towards"] for d in found], [["Hauptbahnhof", "Charlottenplatz"], ["Pragsattel", "Feuerbach Bf"]])
+        self.assertEqual(found[0]["next_stops"], ["Stadtbibliothek"])
+        self.assertEqual(found[0]["platforms"], ["Platform 1"])
+        self.assertEqual(found[0]["departures"], 4)
+        # the most frequent line first
+        self.assertEqual([l["line"] for l in found[0]["lines"]], ["U6", "U5", "U7"])
+        self.assertEqual(found[0]["lines"][0], {"line": "U6", "mode": "u_bahn_tram", "brand": None})
+
+    def test_ways_out_from_the_same_platforms_are_one(self):
+        # the U5 to Killesberg leaves platform 2 another way: still one choice, with both next stops
+        found = self.directions(self.pragfriedhof())
+        self.assertEqual(found[1]["next_stops"], ["Killesberg", "Löwentorbrücke"])
+        self.assertEqual((found[1]["platforms"], found[1]["departures"]), (["Platform 2"], 4))
+
+    def test_on_city_lines_the_second_stop_is_not_the_first_ones_neighbour(self):
+        # Hauptbahnhof and Schlossplatz are neighbours: Charlottenplatz is named instead of Schlossplatz
+        found = self.directions([self.dep(1, "Platform 1", "Stadtbibliothek",
+                                          [("Stadtbibliothek", 1), ("Hauptbahnhof", 30), ("Schlossplatz", 29), ("Charlottenplatz", 20)])])
+        self.assertEqual(found[0]["towards"], ["Hauptbahnhof", "Charlottenplatz"])
+
+    def test_trains_name_their_two_biggest_stops(self):
+        ahead = [("Bad Cannstatt", 36.4), ("Esslingen", 24.8), ("Plochingen", 32.7)]
+        found = self.directions([self.dep(1, "Platform 12", "Bad Cannstatt", ahead, line="MEX16", mode="Trains")])
+        self.assertEqual(found[0]["towards"], ["Bad Cannstatt", "Plochingen"])
+
+    def test_how_many_call_there_counts(self):
+        # Feuerbach is bigger, but only one departure in four goes there; all call at Pragsattel and Hohensteinstraße
+        deps = [self.dep(n, "Platform 2", "Löwentorbrücke",
+                         [("Löwentorbrücke", 15.5), ("Pragsattel", 19.0), ("Maybachstraße", 6.1), ("Hohensteinstraße", 14.0)])
+                for n in range(3)]
+        deps.append(self.dep(5, "Platform 2", "Löwentorbrücke", self.OUT))
+        self.assertEqual(self.directions(deps)[0]["towards"], ["Pragsattel", "Hohensteinstraße"])
+
+    def test_directions_named_alike_are_one(self):
+        ahead = [("Reutlingen Hbf", 30.0), ("Tübingen Hbf", 30.8)]
+        deps = [self.dep(1, "Platform 12", "Nürtingen", [("Nürtingen", 20.0)] + ahead, line="RE6", mode="Trains"),
+                self.dep(2, "Platform 2", "Reutlingen Hbf", ahead, line="RE6a", mode="Trains")]
+        found = self.directions(deps)
+        self.assertEqual(len(found), 1)
+        self.assertEqual((found[0]["towards"], found[0]["next_stops"]), (["Reutlingen Hbf", "Tübingen Hbf"], ["Nürtingen", "Reutlingen Hbf"]))
+        self.assertEqual(found[0]["platforms"], ["Platform 2", "Platform 12"])   # in display order
+
+    def test_a_platform_shared_by_two_kinds_is_named_once(self):
+        # without "trains together", a regional and a long-distance train leave the same Platform 2
+        ahead = [("Ulm Hbf", 37.3)]
+        found = self.directions([self.dep(1, "Platform 2", "Ulm Hbf", ahead, line="RE5", mode="Regional train"),
+                                 self.dep(2, "Platform 2", "Ulm Hbf", ahead, line="ICE 513", mode="Long-distance train", brand="ice"),
+                                 self.dep(3, "Platform 3", "Ulm Hbf", ahead, line="IC 2013", mode="Long-distance train")])
+        self.assertEqual(found[0]["platforms"], ["Platform 2", "Platform 3"])
+        self.assertEqual(found[0]["departures"], 3)
+
+    def test_the_busiest_first_and_nothing_without_a_next_stop(self):
+        deps = self.pragfriedhof() + [self.dep(30 + n, "Platform 2", "Löwentorbrücke", self.OUT) for n in range(3)]
+        deps.append(self.dep(40, "Platform 1", None, []))
+        found = self.directions(deps)
+        self.assertEqual([d["departures"] for d in found], [7, 4])
+        self.assertEqual(self.directions([]), [])
+
+    def test_no_bookkeeping_in_the_rows(self):
+        deps = self.pragfriedhof()
+        ahead = {dep["id"]: dep["ahead"] for dep in deps}
+        modes = group_departures(deps)
+        departures.directions(modes, ahead)
+        row = modes[0]["platforms"][0]["departures"][0]
+        self.assertNotIn("ahead", row)
+        self.assertEqual(list(row)[-1], "next_stop")
+
+    def test_stops_ahead_end_at_the_destination(self):
+        event = {"location": platform("Gleis 1"),
+                 "transportation": {**transport(3), "destination": {"name": "Gerlingen"}},
+                 "onwardLocations": [onward(n, [3], f"de:1:{i}") for i, n in
+                                     enumerate(["Löwentorbrücke", "Heidelberg, Post Waypoint", "Pragsattel", "Gerlingen", "Depot"])]}
+        ahead = parse.stops_ahead(event, {"de:1:2": 19.0})
+        self.assertEqual([name for name, _ in ahead], ["Löwentorbrücke", "Pragsattel", "Gerlingen"])
+        self.assertEqual(ahead[1][1], 19.0)   # from the stop database
+        self.assertEqual(len(parse.stops_ahead({**event, "onwardLocations": event["onwardLocations"] * 1}, {}, horizon=2)), 2)
+        self.assertEqual(parse.stops_ahead({"location": platform("Gleis 1")}), [])
 
 
 class SecondTimetableTest(unittest.TestCase):

@@ -571,7 +571,8 @@ class DeparturesTest(ApiTestCase):
         res = self.get()
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
-        self.assertEqual(list(body), ["stop", "nearby", "tabs", "tab", "modes", "empty", "next_service", "platform", "when"])
+        self.assertEqual(list(body), ["stop", "nearby", "tabs", "tab", "modes", "empty", "next_service", "platform", "when",
+                                      "directions"])
         self.assertIsNone(body["next_service"])
         self.assertIsNone(body["platform"])   # the whole stop, not one platform of it
         self.assertEqual(body["stop"], {"id": STOP, "name": "Stuttgart, Hauptbahnhof (oben)", "lat": 48.784729, "lon": 9.183172})
@@ -594,7 +595,7 @@ class DeparturesTest(ApiTestCase):
 
         departure = platform["departures"][0]
         self.assertEqual(list(departure), ["id", "line", "destination", "via", "dticket", "replacement", "brand", "time", "planned",
-                                           "minutes", "delay", "realtime", "cancelled"])
+                                           "minutes", "delay", "realtime", "cancelled", "next_stop"])
         minutes = departure.pop("minutes")  # depends on the clock
         self.assertIsInstance(minutes, int)
         # the id goes into an address, so it must need no escaping
@@ -611,6 +612,7 @@ class DeparturesTest(ApiTestCase):
             "delay": 4,
             "realtime": True,
             "cancelled": False,
+            "next_stop": "Plochingen",
         })
 
     def test_via_stops_are_ranked_with_the_stop_database(self):
@@ -728,7 +730,8 @@ class PlatformBoardTest(ApiTestCase):
         res = self.get()
         self.assertEqual(res.status_code, 200)
         body = res.get_json()
-        self.assertEqual(list(body), ["stop", "nearby", "tabs", "tab", "modes", "empty", "next_service", "platform", "when"])
+        self.assertEqual(list(body), ["stop", "nearby", "tabs", "tab", "modes", "empty", "next_service", "platform", "when",
+                                      "directions"])
         self.assertEqual(body["stop"]["id"], STOP)
         # one platform has no tabs to choose from; `tab` says what kind of transport it is
         self.assertEqual((body["tabs"], body["tab"], body["empty"], body["next_service"]), ([], "bus", None, None))

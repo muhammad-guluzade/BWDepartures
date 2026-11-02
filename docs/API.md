@@ -341,7 +341,8 @@ and one departure)
               "minutes": 63,
               "delay": 4,
               "realtime": true,
-              "cancelled": false
+              "cancelled": false,
+              "next_stop": "Bad Cannstatt"
             }
           ]
         }
@@ -351,7 +352,16 @@ and one departure)
   "empty": null,
   "next_service": null,
   "platform": null,
-  "when": null
+  "when": null,
+  "directions": [
+    {
+      "next_stops": ["Bad Cannstatt"],
+      "towards": ["Bad Cannstatt", "Plochingen"],
+      "lines": [{"line": "MEX13", "mode": "regional_train", "brand": null}, {"line": "MEX90", "mode": "regional_train", "brand": null}],
+      "platforms": ["Platform 2", "Platform 12", "Platform 13"],
+      "departures": 28
+    }
+  ]
 }
 ```
 
@@ -367,9 +377,26 @@ and one departure)
 | `empty` | `null` if there are departures. Otherwise why there are none: `"nearby"` (nothing departs here in the next 7 days, but linked stations in `nearby` have service), `"no_service"` (the timetable has nothing for this station in the next 7 days, nor for the ones next to it), when one platform was asked for, `"platform"` (nothing departs from it in the next 24 hours), or `"no_timetable"` (the `when` asked for is outside the timetable period, e.g. after the December timetable change before the next timetable is published). "Next 24 hours / 7 days" count from `when` if one was given. |
 | `platform` | `null`, unless one platform was asked for: then that platform, see "One platform". |
 | `when` | The moment the departures start from, in UTC (`"2026-10-25T06:00:00Z"`), as asked for with `when`; `null` for now. |
+| `directions` | The ways the departures listed leave this stop, the busiest first, see below. `[]` when there are none. Added to v1 in November 2026. |
 | `next_service` | Normally `null`. The timetable service only knows the next 24 hours; a stop served on school days only has nothing there on a Saturday. In that case the API looks up to a week ahead, returns the first departures it finds in `modes` (all transport types together, `tabs` empty) and sets `next_service` to their local date, e.g. `"2026-10-05"`. A client should say so, and show the date with these departures. |
 
 Tab ids: `trains`, `sbahn`, `tram`, `bus`, `ferry`, `cablecar`, `other`.
+
+**`directions[]`**
+
+A direction is the way a vehicle leaves the stop: its next stop. Directions
+that leave from exactly the same platforms, or that come out with the same
+name, are one. A client can let a traveller pick the way they are going and
+put the platforms of that direction first (BW Departures does). It describes
+the departures in this response, so it can change over the day.
+
+| Field | |
+|---|---|
+| `next_stops` | The next stops of the departures in this direction, as their `next_stop` says. What a client should remember a chosen direction by: platform numbers can change from day to day, the next stop does not. |
+| `towards` | One or two major stops the departures of this direction call at soon, in travel order, to name it by (`["Hauptbahnhof (A.-Klett-Platz)", "Charlottenplatz"]`). Picked by the stop database's importance and by how many of the departures call there. |
+| `lines` | The lines going this way, the most frequent first: `[{line, mode, brand}]`, with `mode` and `brand` as for a mode and a departure (for badge colours). |
+| `platforms` | The `name`s of the platforms (as in `modes`) they leave from, in display order. |
+| `departures` | How many of the departures listed go this way. |
 
 **`modes[]`**
 
@@ -409,6 +436,7 @@ Tab ids: `trains`, `sbahn`, `tram`, `bus`, `ferry`, `cablecar`, `other`.
 | `delay` | Minutes late (negative = early), or `null` without live data. |
 | `realtime` | `true` if `time` comes from live data. |
 | `cancelled` | `true` if the trip is cancelled. |
+| `next_stop` | The first stop after this one: the way the vehicle leaves (see `directions`). `null` if none is known. Added to v1 in November 2026. |
 
 **One platform** (`/api/v1/stops/de:08118:7402/departures?platform=de:08118:7402:5:15`,
 bay 15 of Ludwigsburg's bus station)
@@ -457,7 +485,8 @@ a station whose trains are currently replaced by buses from the bus station):
   "empty": "nearby",
   "next_service": null,
   "platform": null,
-  "when": null
+  "when": null,
+  "directions": []
 }
 ```
 
