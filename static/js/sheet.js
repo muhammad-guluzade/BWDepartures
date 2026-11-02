@@ -64,10 +64,10 @@
   //     starts sideways there is theirs;
   //   'chips' (the line filter): they only scroll sideways (style.css);
   //   'list': it scrolls; pulled down at its very top, the sheet goes down.
-  //   (On a low screen the nearby stops are one line that scrolls sideways:
-  //   they behave like the tabs.)
+  //   (The nearby stops are one line that scrolls sideways: they behave like
+  //   the tabs. The time beside the tabs is part of the strip.)
   const zoneOf = target => (!head.contains(target) ? 'list'
-    : target.closest('.line-chips') ? 'chips' : target.closest('.tabs') || (low.matches && target.closest('.nearby')) ? 'tabs' : 'strip');
+    : target.closest('.line-chips') ? 'chips' : target.closest('.tabs') || target.closest('.nearby') ? 'tabs' : 'strip');
   // the heights there are in the layout, top to bottom
   const heights = () => (screens() ? ['full', 'peek'] : ['full', 'half', 'peek']);
 

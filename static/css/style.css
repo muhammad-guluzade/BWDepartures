@@ -731,6 +731,37 @@ body.route-mode #panel-close { display: none !important; }
   .station-name { font-size: 1.15rem; }
 }
 
+/* ---------- the compact head on phones and tablets (the user's choice A, 2 November 2026) ----------
+   At big stations the head's parts one under the other took 257 px of the sheet. Now, row by row:
+   the grip's strip (with "Updated" on the left and, at full height, "Map" on the right), the stop's
+   name with its buttons at the row's end (a long name wraps under itself, the buttons never move),
+   the nearby stops on one line, the tabs with the time beside them, the line chips. */
+@media (max-width: 1023.98px) {
+  #panel-head { flex-direction: row; flex-wrap: wrap; align-items: center; }
+  #sheet-grip, .station-name, #route-head, #peek, .nearby, #panel-head .line-chips, #status { flex: 0 0 100%; }
+  body.sheet-half #sheet-grip, body.sheet-full #sheet-grip { height: 26px; }
+  #sheet-grip::before { margin-top: 9px; }
+  body:not(.layout-screens).sheet-half #status, body:not(.layout-screens).sheet-full #status { position: absolute; top: 5px; left: 14px; z-index: 1;
+    max-width: calc(50% - 50px); margin: 0; font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  body.sheet-full:not(.layout-screens) #sheet-map { top: 2px; padding: 2px 12px; font-size: 0.78rem; border-radius: 12px; }
+  /* the name and its buttons: the buttons right after the name, on its first line */
+  .station-name { display: flex; align-items: flex-start; padding-right: 0; font-size: 1.1rem; }
+  .station-name .fav-star, .station-name .route-here, .station-name .view-button { flex-shrink: 0; margin-top: -3px; margin-bottom: -3px; }
+  .nearby { margin-top: 0; font-size: 0.8rem; white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .nearby::-webkit-scrollbar { display: none; }
+  body:not(.layout-screens) #panel-head .nearby { touch-action: pan-x; }
+  /* the tabs on the left, the time on the right (alone when there is only one kind of transport) */
+  #panel-head .tabs { flex: 1 1 0; min-width: 0; margin: 6px 8px 0 0; }
+  #when-bar { order: 5; flex: none; gap: 4px; margin: 6px 0 0 auto; }
+  #when-bar button { height: 28px; }
+  #when-earlier, #when-later, #when-reset { width: 28px; line-height: 28px; }
+  #when-chip { padding: 0 11px; }
+  #panel-head .line-chips { order: 6; margin-top: 6px; }
+  #status { order: 7; }
+  /* less room between the head and the list's first heading */
+  .mode-section { margin-top: 10px; }
+}
+
 /* ---------- phones held sideways (low screens): the sheet's head in two columns ----------
    Its parts one under the other were taller than half such a screen, so no departure was in
    sight. Left: the stop's name, the nearby stops, the status; right: the tabs, the line chips,
@@ -754,4 +785,10 @@ body.route-mode #panel-close { display: none !important; }
   /* less room between the head's rows and the list's headings */
   #panel-head .tabs, #panel-head .line-chips, #when-bar { margin-top: 4px; }
   .mode-section { margin-top: 8px; }
+  /* (the compact head above is for phones held upright: here the parts keep their columns and order) */
+  #panel-head .tabs { margin-right: 0; }
+  #panel-head .line-chips { order: 4; }
+  #when-bar { margin-left: 0; }
+  body:not(.layout-screens).sheet-half #status, body:not(.layout-screens).sheet-full #status { position: static; max-width: none; margin-top: 2px;
+    font-size: 0.8rem; white-space: normal; overflow: visible; pointer-events: auto; }
 }
