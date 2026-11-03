@@ -224,6 +224,12 @@ def get_departures(stop_id: str, classes=(), limit: int = 100, with_stops: bool 
 
 
 JOURNEYS_TTL = 30
+# How fast a traveller changes between rides. The planner's default ("normal")
+# rules out changes that people make every day: S4 to bus 53 at Zuffenhausen in
+# 4 minutes (3 November 2026), which DB Navigator offers. "fast" is what DB
+# Navigator does; the walking minutes are shown, so the traveller can judge.
+# The walk to the first stop and from the last one stays at normal speed.
+CHANGE_SPEED = "fast"
 
 
 def get_journeys(origin: str, destination: str, start: datetime | None = None, arrive: bool = False,
@@ -248,6 +254,7 @@ def get_journeys(origin: str, destination: str, start: datetime | None = None, a
         local = to_local(start)  # EFA takes the time in German local time
         params.update({"itdDate": local.strftime("%Y%m%d"), "itdTime": local.strftime("%H%M")})
     params["itdTripDateTimeDepArr"] = "arr" if arrive else "dep"
+    params["changeSpeed"] = CHANGE_SPEED
     if classes:
         params["includedMeans"] = "checkbox"
         for cls in classes:

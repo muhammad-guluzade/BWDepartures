@@ -203,6 +203,8 @@ class SlowPlannerTest(unittest.TestCase):
             def json(self):
                 return {"journeys": [], "stopEvents": []}
 
+        self.Answer = Answer
+
         def fake_get(url, params=None, timeout=None):
             test.calls.append((url.rsplit("/", 1)[-1], timeout))
             return Answer(test.codes.pop(0) if test.codes else 200)
@@ -217,6 +219,14 @@ class SlowPlannerTest(unittest.TestCase):
         client.get_journeys("de:08111:115", "de:08415:22006")
         self.assertEqual(self.calls, [("XML_TRIP_REQUEST2", client.JOURNEYS_TIMEOUT)] * 2)
         self.assertGreaterEqual(client.JOURNEYS_TIMEOUT, 30)
+
+    def test_journeys_are_planned_with_fast_changes(self):
+        # (S4 -> bus 53 at Zuffenhausen in 4 minutes: "normal" ruled it out, 3 November 2026)
+        sent = []
+        client._session.get = lambda url, params=None, timeout=None: (sent.append(params), self.Answer(200))[1]
+        client.get_journeys("de:08111:115", "de:08415:22006")
+        self.assertEqual(sent[0]["changeSpeed"], "fast")
+        self.assertNotIn("itOptionsActive", sent[0])   # the walks to and from the stops keep their normal speed
 
     def test_two_failures_are_an_error(self):
         self.codes = [502, 502]
