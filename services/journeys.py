@@ -30,6 +30,12 @@ WITHOUT_BUSES = [0, 1, 2, 3, 4, 13, 14, 15, 16]   # trains, S-Bahn, U-Bahn / Sta
 RAIL_JOURNEYS = 4
 RAIL_ALTERNATIVES = 3
 RAIL_LATER_MINUTES = 60   # an alternative arrives at most this much after the latest connection found
+# Connections that start a little before the time asked for are kept, as DB
+# Navigator does (asked 16:30, it also offers 16:27-16:29): a walk to the station
+# planned from 05:28 is still made at 05:30 by walking a little faster. Their
+# first bus or train must not have left, though.
+EARLIER_MINUTES = 3
+GONE_GRACE_MINUTES = 1    # the clocks of the phone and of the timetable can differ a little
 # the two questions go to the planner at the same time
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="journeys")
 # a point counts as in Baden-Württemberg when a stop of the state is this near
@@ -145,6 +151,15 @@ def read_journeys(data: dict, importance: dict, dticket: bool) -> list:
     return journeys
 
 
+def first_ride_leaves(journey: dict) -> str:
+    """When the first bus or train of a connection leaves (live when known);
+    "9999" (never gone) when it has none: a walk alone can always be started."""
+    ride = next((leg for leg in journey["legs"] if leg["kind"] == "ride"), None)
+    if not ride:
+        return "9999"
+    return ride["from"].get("time") or ride["from"].get("planned") or ""
+
+
 def plan(origin: str, destination: str, start: datetime | None = None, arrive: bool = False, dticket: bool = False) -> dict:
     """{from, to, when, arrive, dticket, journeys: [...], empty}. `start` is
     a UTC moment (None: now): the departure, or with `arrive` the latest
@@ -180,10 +195,14 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
         in_time = [j for j in journeys if (j["arrival"]["planned"] or "") <= latest]
         journeys = in_time or journeys
     elif not arrive:
-        # ... and some that have already left (a minute's grace: the clock of
-        # the phone and of the timetable can differ a little)
-        earliest = ((start or datetime.now(timezone.utc)) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        journeys = [j for j in journeys if (j["departure"]["time"] or "") >= earliest]
+        # ... and some that start well before the time asked for, or whose first
+        # ride has already left
+        now = datetime.now(timezone.utc)
+        asked = start or now
+        earliest = (asked - timedelta(minutes=EARLIER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # (a time chosen in the past is looked at as if it were now)
+        gone = (min(asked, now) - timedelta(minutes=GONE_GRACE_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        journeys = [j for j in journeys if (j["departure"]["time"] or "") >= earliest and first_ride_leaves(j) >= gone]
     journeys.sort(key=lambda j: (j["departure"]["time"] or "", j["arrival"]["time"] or ""))
     for journey in journeys:
         for leg in journey["legs"]:

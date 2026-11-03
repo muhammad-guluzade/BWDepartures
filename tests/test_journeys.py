@@ -237,6 +237,47 @@ class PlanTest(unittest.TestCase):
         self.answer = {"journeys": [gone, journey()]}
         self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
 
+    def shifted(self, minutes, walk_first=0):
+        """journey() moved by `minutes`; with `walk_first`, a walk of that many minutes from a
+        point on the map to Pragfriedhof comes first, ending when the U15 leaves."""
+        moved = journey()
+        for leg in moved["legs"]:
+            for end in (leg["origin"], leg["destination"]):
+                for key in [k for k in end if k.endswith("Planned") or k.endswith("Estimated")]:
+                    end[key] = (datetime.strptime(end[key], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                                + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if walk_first:
+            board = moved["legs"][0]["origin"]
+            home = {"name": "Rosenackerweg 20", "type": "singlehouse", "coord": [48.9, 9.17],
+                    "departureTimePlanned": (datetime.strptime(board["departureTimePlanned"], "%Y-%m-%dT%H:%M:%SZ")
+                                             - timedelta(minutes=walk_first)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            moved["legs"].insert(0, {**walk(home, board, walk_first, cls=100)})
+        return moved
+
+    def test_connections_starting_a_little_early_are_kept(self):
+        # asked for LATER (ahead): as DB Navigator, up to 3 minutes earlier, not more
+        self.answer = {"journeys": [self.shifted(-2), self.shifted(-5), self.shifted(1)]}
+        result = journeys.plan(PRAG, ULM, start=LATER)
+        self.assertEqual([j["departure"]["time"] for j in result["journeys"]], [at(-2), at(1)])
+
+    def test_a_time_chosen_in_the_past_is_looked_at_as_if_it_were_now(self):
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        to_past = round((past - LATER).total_seconds() / 60)
+        self.answer = {"journeys": [self.shifted(to_past + 5), self.shifted(to_past - 2, walk_first=0), self.shifted(to_past + 5, walk_first=7)]}
+        result = journeys.plan(PRAG, ULM, start=past.replace(second=0, microsecond=0))
+        # leaving 5 minutes after the chosen time, and a walk that starts 2 minutes before it: shown; a U15 2 minutes before: gone
+        self.assertEqual(len(result["journeys"]), 2)
+
+    def test_now_a_walk_started_a_little_ago_is_kept_a_ride_that_left_is_not(self):
+        now = datetime.now(timezone.utc)
+        to_now = round((now - LATER).total_seconds() / 60)
+        walk_ago = self.shifted(to_now + 5, walk_first=7)   # the walk should have started 2 minutes ago, the U15 leaves in 5
+        bus_gone = self.shifted(to_now - 2)                 # its U15 left 2 minutes ago
+        self.answer = {"journeys": [walk_ago, bus_gone]}
+        result = journeys.plan(PRAG, ULM)
+        self.assertEqual(len(result["journeys"]), 1)
+        self.assertEqual(result["journeys"][0]["legs"][0]["kind"], "walk")
+
     def test_arrive_by(self):
         late = journey()
         late["legs"][-1]["destination"]["arrivalTimePlanned"] = at(200)
