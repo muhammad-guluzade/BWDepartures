@@ -102,6 +102,15 @@ class ParseJourneyTest(unittest.TestCase):
             self.assertTrue(parse.is_walk(leg), cls)
         self.assertFalse(parse.is_walk(ride(U15, platform(PRAG, "a", "1", [48.0, 9.0]), platform(ULM, "b", "2", [48.1, 9.1]))))
 
+    def test_staying_seated_is_no_ride(self):
+        # "nicht umsteigen" (class 97) between two lines that are one bus: no ride called "?"
+        j = journey(walk_minutes=0)
+        stay = {"duration": 60, "origin": j["legs"][0]["destination"], "destination": j["legs"][1]["origin"],
+                "transportation": {"product": {"class": 97, "name": "nicht umsteigen"}}, "infos": []}
+        j["legs"].insert(1, stay)
+        parsed = parse.parse_journey(j)
+        self.assertEqual([leg.get("line") for leg in parsed["legs"]], ["U15", "RE5"])
+
     def test_changes(self):
         # U15 arrives at +4, a 10 min walk, the train leaves at +14: no minute to spare, possible
         t = parse.parse_journey(journey(change_at=14))["transfers"][0]
@@ -241,6 +250,21 @@ class PlanTest(unittest.TestCase):
         demand = journey(second={**RE5, "product": {"class": 10, "name": "AST"}})
         self.answer = {"journeys": [demand]}
         self.assertEqual(journeys.plan(PRAG, ULM)["journeys"], [])
+
+    def test_taxis_are_not_offered(self):
+        # leaving buses out, the planner fills in with taxis (product class 105), even for a whole trip
+        taxi = {"product": {"class": 105, "name": "Taxi"}, "properties": {"tripCode": 0}}
+        whole = {**journey(), "legs": [{**journey()["legs"][0], "transportation": taxi}]}
+        first = journey()
+        first["legs"][0] = {**first["legs"][0], "transportation": taxi}
+        self.rail_answer = {"journeys": [whole, first]}
+        self.answer = {"journeys": [journey(second=ICE, change_at=20)]}
+        result = journeys.plan(PRAG, ULM)
+        self.assertEqual([[leg.get("line") for leg in j["legs"] if leg["kind"] == "ride"] for j in result["journeys"]], [["U15", "ICE 569"]])
+        for cls in (101, 105, 107):
+            self.assertTrue(parse.is_excluded({"transportation": {"product": {"class": cls}}}))
+        for cls in (0, 5, 13, 99, 100):
+            self.assertFalse(parse.is_excluded({"transportation": {"product": {"class": cls}}}))
 
     def test_why_nothing(self):
         self.answer = {"journeys": [], "systemMessages": [{"type": "error", "code": -4007}]}

@@ -232,10 +232,19 @@ def parse_station(station_response: dict) -> dict | None:
 
 # --- departures: transport -------------------------------------------------
 
+# The journey planner's own "individual transport" above 100 (100 and 99 are
+# walks): 105 is a taxi, which it puts in when buses are left out (3 November
+# 2026: Rust -> Heitersheim, 50 km by taxi, shown as the fastest connection);
+# bicycles and cars are numbered nearby. None of it is scheduled transport.
+INDIVIDUAL_TRANSPORT_FROM = 101
+
+
 def is_excluded(event: dict) -> bool:
-    """Flights and on-demand services are not shown at all."""
+    """Flights, on-demand services and taxis (and other individual transport
+    of the journey planner) are not shown at all."""
     product = (event.get("transportation") or {}).get("product") or {}
-    return product.get("class") in EXCLUDED_CLASSES
+    cls = product.get("class")
+    return cls in EXCLUDED_CLASSES or (isinstance(cls, int) and cls >= INDIVIDUAL_TRANSPORT_FROM)
 
 
 def transport_attrs(transportation: dict) -> set:
@@ -869,6 +878,12 @@ def journey_line(line: str, transportation: dict) -> str:
     return line
 
 
+# "nicht umsteigen": the planner's mark between two lines that are one vehicle
+# (a bus that goes on as another line); without a line of its own it showed as
+# a ride called "?"
+STAY_SEATED_CLASS = 97
+
+
 def parse_journey(journey: dict, importance: dict | None = None) -> dict | None:
     """One connection: {id, departure, arrival, minutes, changes, dticket,
     legs: [...], transfers: [...]}. None if it can't be read."""
@@ -878,6 +893,8 @@ def parse_journey(journey: dict, importance: dict | None = None) -> dict | None:
     city = locality(raw_legs[0].get("origin") or {})
     legs = []
     for leg in raw_legs:
+        if ((leg.get("transportation") or {}).get("product") or {}).get("class") == STAY_SEATED_CLASS:
+            continue   # not a ride of its own: the vehicle goes on under another line number
         start = journey_place(leg.get("origin") or {}, city, arriving=False)
         end = journey_place(leg.get("destination") or {}, city, arriving=True)
         if is_walk(leg):
