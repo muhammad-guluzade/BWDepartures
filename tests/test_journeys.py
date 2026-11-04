@@ -150,8 +150,16 @@ class PlanTest(unittest.TestCase):
 
         self.rail_answer = {"journeys": []}
         self.rail_asked = []
+        self.twin_answer = {"journeys": []}
+        self.twin_asked = []
 
         def fake(origin, destination, start=None, arrive=False, classes=(), count=5):
+            # the twins' question: every kind of transport but one
+            if classes and count == journeys.RAIL_JOURNEYS and not set(classes) <= set(journeys.WITHOUT_BUSES):
+                self.twin_asked.append((origin, destination, start, arrive, tuple(classes), count))
+                if isinstance(self.twin_answer, Exception):
+                    raise self.twin_answer
+                return self.twin_answer
             # the second question, without buses, is answered on its own (see AlternativesTest)
             if list(classes) and set(classes) <= set(journeys.WITHOUT_BUSES):
                 self.rail_asked.append((origin, destination, start, arrive, tuple(classes), count))
@@ -306,6 +314,34 @@ class PlanTest(unittest.TestCase):
             self.assertTrue(parse.is_excluded({"transportation": {"product": {"class": cls}}}))
         for cls in (0, 5, 13, 99, 100):
             self.assertFalse(parse.is_excluded({"transportation": {"product": {"class": cls}}}))
+
+    def test_an_equally_fast_twin_is_added(self):
+        # the fastest goes U15 -> RE5; asked without the RE5's kind (13), the planner offers U15 -> ICE, as fast
+        self.answer = {"journeys": [journey()]}
+        twin = journey(second={**ICE, "product": {"id": 0, "class": 16, "name": "Zug"}})
+        slower = journey(second=ICE)
+        slower["legs"][-1]["destination"]["arrivalTimePlanned"] = slower["legs"][-1]["destination"]["arrivalTimeEstimated"] = at(80)
+        self.twin_answer = {"journeys": [twin, slower]}
+        result = journeys.plan(PRAG, ULM, start=LATER)
+        self.assertEqual(len(self.twin_asked), 1)
+        self.assertNotIn(13, self.twin_asked[0][4])           # the kind after the change left out
+        self.assertIn(3, self.twin_asked[0][4])               # ... the others asked for
+        lines = [[leg.get("line") for leg in j["legs"] if leg["kind"] == "ride"] for j in result["journeys"]]
+        self.assertEqual(sorted(map(tuple, lines)), [("U15", "ICE 569"), ("U15", "RE5")])   # the slower one is not a twin
+        self.assertTrue(all("_classes" not in j for j in result["journeys"]))
+
+    def test_no_twins_asked_without_a_change_or_when_arriving_by(self):
+        one_ride = journey(walk_minutes=0)
+        one_ride["legs"] = one_ride["legs"][:1]
+        self.answer = {"journeys": [one_ride]}
+        journeys.plan(PRAG, ULM, start=LATER)
+        self.answer = {"journeys": [journey()]}
+        journeys.plan(PRAG, ULM, start=LATER, arrive=True)
+        self.assertEqual(self.twin_asked, [])
+
+    def test_twins_are_a_bonus(self):
+        self.twin_answer = client.EfaError("down")
+        self.assertEqual(len(journeys.plan(PRAG, ULM, start=LATER)["journeys"]), 1)
 
     def test_why_nothing(self):
         self.answer = {"journeys": [], "systemMessages": [{"type": "error", "code": -4007}]}

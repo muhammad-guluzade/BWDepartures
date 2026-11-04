@@ -36,6 +36,18 @@ RAIL_LATER_MINUTES = 60   # an alternative arrives at most this much after the l
 # first bus or train must not have left, though.
 EARLIER_MINUTES = 3
 GONE_GRACE_MINUTES = 1    # the clocks of the phone and of the timetable can differ a little
+# The planner offers ONE connection per start and arrival time: of two equally fast
+# ones it keeps one (4 November 2026: walk, S4 05:33, U12 from Nordbahnhof, 06:05 -
+# and not the same S4 with bus 53 from Zuffenhausen, also 06:05). DB Navigator
+# shows such twins. So when the fastest connection has a change, the planner is
+# asked once more without the kind of transport taken after that change, and up
+# to TWINS_MAX connections arriving at most TWIN_LATER_MINUTES after it are added
+# (the user's choice, option 2). Asked after the first answer (it needs it), and
+# only waited for TWIN_TIMEOUT seconds: twins are a bonus.
+ALL_CLASSES = [c for c in range(20) if c not in parse.EXCLUDED_CLASSES]
+TWINS_MAX = 2
+TWIN_LATER_MINUTES = 2
+TWIN_TIMEOUT = 8
 # the two questions go to the planner at the same time
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="journeys")
 # a point counts as in Baden-Württemberg when a stop of the state is this near
@@ -144,6 +156,10 @@ def read_journeys(data: dict, importance: dict, dticket: bool) -> list:
         if dticket and not journey["dticket"]:
             continue
         seen.add(journey["id"])
+        # (the product classes of its rides, in order: what the twins' question leaves out; not in the answer)
+        journey["_classes"] = [((event.get("transportation") or {}).get("product") or {}).get("class")
+                               for event in ride_events(raw)
+                               if ((event.get("transportation") or {}).get("product") or {}).get("class") != parse.STAY_SEATED_CLASS]
         for leg in journey["legs"]:
             if leg["kind"] == "ride" and leg["mode"] in departures.TRAIN_MODES:
                 leg["mode"] = departures.TRAINS     # as on the boards: one kind "Trains"
@@ -158,6 +174,46 @@ def first_ride_leaves(journey: dict) -> str:
     if not ride:
         return "9999"
     return ride["from"].get("time") or ride["from"].get("planned") or ""
+
+
+def in_time(journeys: list, start: datetime | None, arrive: bool) -> list:
+    """The connections that fit the time asked for."""
+    if arrive and start:
+        # the planner also offers some that arrive later than asked
+        latest = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        in_time_ = [j for j in journeys if (j["arrival"]["planned"] or "") <= latest]
+        return in_time_ or journeys
+    if arrive:
+        return journeys
+    # ... and some that start well before the time asked for, or whose first
+    # ride has already left
+    now = datetime.now(timezone.utc)
+    asked = start or now
+    earliest = (asked - timedelta(minutes=EARLIER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # (a time chosen in the past is looked at as if it were now)
+    gone = (min(asked, now) - timedelta(minutes=GONE_GRACE_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return [j for j in journeys if (j["departure"]["time"] or "") >= earliest and first_ride_leaves(j) >= gone]
+
+
+def twins(asked_from: str, asked_to: str, start: datetime | None, dticket: bool, importance: dict,
+          journeys: list, known: set) -> list:
+    """Connections as fast as the fastest one, by another way after its first
+    change (see TWINS_MAX); [] when there is nothing to ask or no answer in time."""
+    fastest = min(journeys, key=lambda j: j["arrival"]["time"] or "9999")
+    classes = fastest.get("_classes") or []
+    if len(classes) < 2 or classes[1] is None or classes[1] == classes[0] or not fastest["arrival"]["time"]:
+        return []
+    allowed = [c for c in (DTICKET_CLASSES if dticket else ALL_CLASSES) if c != classes[1]]
+    try:
+        data = _pool.submit(client.get_journeys, asked_from, asked_to, start, False, allowed, RAIL_JOURNEYS).result(timeout=TWIN_TIMEOUT)
+    except Exception:  # noqa: BLE001 -- no answer, or too late: the list goes without
+        log.info("No twins for %s -> %s", asked_from, asked_to)
+        return []
+    limit = (datetime.strptime(fastest["arrival"]["time"], "%Y-%m-%dT%H:%M:%SZ")
+             + timedelta(minutes=TWIN_LATER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    found = [j for j in in_time(read_journeys(data, importance, dticket), start, False)
+             if j["id"] not in known and any(leg["kind"] == "ride" for leg in j["legs"]) and (j["arrival"]["time"] or "") <= limit]
+    return sorted(found, key=lambda j: j["arrival"]["time"] or "")[:TWINS_MAX]
 
 
 def plan(origin: str, destination: str, start: datetime | None = None, arrive: bool = False, dticket: bool = False) -> dict:
@@ -189,20 +245,12 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
              and any(leg["kind"] == "ride" for leg in j["legs"]) and (not limit or (j["arrival"]["time"] or "") <= limit)]
     # the ones arriving soonest; the list is put in order below
     journeys += sorted(extra, key=lambda j: j["arrival"]["time"] or "")[:RAIL_ALTERNATIVES]
-    if arrive and start:
-        # the planner also offers some that arrive later than asked
-        latest = start.strftime("%Y-%m-%dT%H:%M:%SZ")
-        in_time = [j for j in journeys if (j["arrival"]["planned"] or "") <= latest]
-        journeys = in_time or journeys
-    elif not arrive:
-        # ... and some that start well before the time asked for, or whose first
-        # ride has already left
-        now = datetime.now(timezone.utc)
-        asked = start or now
-        earliest = (asked - timedelta(minutes=EARLIER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # (a time chosen in the past is looked at as if it were now)
-        gone = (min(asked, now) - timedelta(minutes=GONE_GRACE_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        journeys = [j for j in journeys if (j["departure"]["time"] or "") >= earliest and first_ride_leaves(j) >= gone]
+    journeys = in_time(journeys, start, arrive)
+    if journeys and not arrive:
+        known = {j["id"] for j in journeys}
+        journeys += twins(asked_from, asked_to, start, dticket, importance, journeys, known)
+    for journey in journeys:
+        journey.pop("_classes", None)
     journeys.sort(key=lambda j: (j["departure"]["time"] or "", j["arrival"]["time"] or ""))
     for journey in journeys:
         for leg in journey["legs"]:
