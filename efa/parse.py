@@ -751,11 +751,11 @@ def parse_departure(event: dict, now: datetime | None = None, importance: dict |
 # address or a point on the map, 99 between two stations (Arnulf-Klett-Platz
 # to the Hauptbahnhof)
 WALK_CLASSES = {99, 100}
-# The least time a change needs when the planner gives no walk for it (it
-# only says "Fussweg" without minutes): to another platform, and staying on
-# the same one. A walk leg brings its own minutes.
-CHANGE_OTHER_PLATFORM_MINUTES = 2
-CHANGE_SAME_PLATFORM_MINUTES = 1
+# The least time a change needs (the user's rule, 4 November 2026): 2 minutes,
+# or the walk's own minutes when a walk leg is longer. A change the timetable
+# itself plans shorter (a bus waiting for a tram at the same stop, 1 minute) is
+# kept as long as delays do not make it shorter still.
+CHANGE_MINUTES = 2
 
 
 def is_walk(leg: dict) -> bool:
@@ -858,13 +858,43 @@ def simplify(points: list, tolerance: float) -> list:
     return [point for point, kept in zip(points, keep) if kept]
 
 
-def change_minutes_needed(walk: dict | None, arriving: dict, leaving: dict) -> int:
-    """The least time a change takes: the walk's own minutes, else a little
-    more for another platform than for the same one."""
-    if walk is not None:
-        return walk["minutes"]
-    same = arriving["id"] == leaving["id"] and arriving["platform"]["code"] == leaving["platform"]["code"]
-    return CHANGE_SAME_PLATFORM_MINUTES if same else CHANGE_OTHER_PLATFORM_MINUTES
+def change_minutes_needed(walk: dict | None) -> int:
+    """The least time a change takes: CHANGE_MINUTES, or the walk's minutes
+    when they are more."""
+    return max(CHANGE_MINUTES, walk["minutes"] if walk else 0)
+
+
+def change_possible(gap: float, planned_gap: float | None, needed: int) -> bool:
+    """Can a change of `gap` minutes (this ride's arrival to the next one's
+    departure, live when known) still be made? With `needed` minutes, or with
+    no less than the timetable plans (then it is the operators' own plan);
+    never when the next ride leaves first."""
+    if gap < 0:
+        return False
+    return gap >= needed or (planned_gap is not None and gap >= planned_gap)
+
+
+def transfers_of(legs: list) -> list:
+    """One entry per change of a connection's legs (see parse_journey)."""
+    transfers = []
+    for i, leg in enumerate(legs):
+        if leg["kind"] != "ride":
+            continue
+        later = [j for j in range(i + 1, len(legs)) if legs[j]["kind"] == "ride"]
+        if not later:
+            break
+        nxt = legs[later[0]]
+        walks = [legs[j] for j in range(i + 1, later[0]) if legs[j]["kind"] == "walk"]
+        walk = {"minutes": sum(w["minutes"] for w in walks)} if walks else None
+        arrival, leaving = parse_time(leg["to"]["time"]), parse_time(nxt["from"]["time"])
+        planned_arrival, planned_leaving = parse_time(leg["to"]["planned"]), parse_time(nxt["from"]["planned"])
+        needed = change_minutes_needed(walk)
+        gap = whole_minutes(leaving - arrival) if arrival and leaving else None
+        planned_gap = whole_minutes(planned_leaving - planned_arrival) if planned_arrival and planned_leaving else None
+        transfers.append({"at": leg["to"]["name"], "to": nxt["from"]["name"], "walk_minutes": walk["minutes"] if walk else None,
+                          "needed_minutes": needed, "spare_minutes": None if gap is None else gap - needed,
+                          "possible": gap is None or change_possible(gap, planned_gap, needed)})
+    return transfers
 
 
 def journey_line(line: str, transportation: dict) -> str:
@@ -924,21 +954,7 @@ def parse_journey(journey: dict, importance: dict | None = None) -> dict | None:
             "notices": journey_notices(leg),
         })
     rides = [leg for leg in legs if leg["kind"] == "ride"]
-    transfers = []
-    for i, leg in enumerate(legs):
-        if leg["kind"] != "ride":
-            continue
-        later = [j for j in range(i + 1, len(legs)) if legs[j]["kind"] == "ride"]
-        if not later:
-            break
-        nxt = legs[later[0]]
-        walks = [legs[j] for j in range(i + 1, later[0]) if legs[j]["kind"] == "walk"]
-        walk = {"minutes": sum(w["minutes"] for w in walks)} if walks else None
-        arrival, leaving = parse_time(leg["to"]["time"]), parse_time(nxt["from"]["time"])
-        needed = change_minutes_needed(walk, leg["to"], nxt["from"])
-        spare = whole_minutes(leaving - arrival) - needed if arrival and leaving else None
-        transfers.append({"at": leg["to"]["name"], "to": nxt["from"]["name"], "walk_minutes": walk["minutes"] if walk else None,
-                          "needed_minutes": needed, "spare_minutes": spare, "possible": spare is None or spare >= 0})
+    transfers = transfers_of(legs)
     first, last = legs[0]["from"], legs[-1]["to"]
     departure = parse_time(first["time"])
     arrival = parse_time(last["time"])

@@ -1065,6 +1065,8 @@
 
   function transferText(t) {
     if (!t || t.spare_minutes === null) return null;
+    // a change the timetable itself plans under the usual minutes (a bus waiting for the tram) is possible
+    if (t.possible && t.spare_minutes < 0) return el('span', 'ok', `${t.spare_minutes + t.needed_minutes} min to change`);
     if (t.possible) return el('span', 'ok', `${t.spare_minutes} min to spare`);
     const left = Math.max(0, t.spare_minutes + t.needed_minutes);
     return el('span', 'late', `Only ${left} min to change (${t.needed_minutes} needed)`);

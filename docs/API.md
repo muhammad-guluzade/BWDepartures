@@ -603,6 +603,12 @@ without buses (trains, S-Bahn, U-Bahn, tram), and up to 3 of those that its firs
 have are added (each with a ride, arriving at most an hour after the latest connection found), so
 a slower connection by S-Bahn is offered next to a faster one by bus.
 
+The planner works with live times and drops a connection when a delay makes a change shorter than
+its own minimum for that stop (4 minutes from the S-Bahn to the U12 at Stuttgart Nordbahnhof). Within
+about an hour before and three hours after now it is also asked by the timetable alone; a connection
+with a change that only that answer has is checked with its rides' live times and offered when
+every change can still be made by the rule of `transfers` below.
+
 Connections that left before `when` (or now) are left out, and with `arrive`
 those arriving after `when`; flights and on-demand services are never
 offered. Example (shortened to one connection; times in UTC):
@@ -661,7 +667,7 @@ offered. Example (shortened to one connection; times in UTC):
 | `journeys` | The connections, by departure. They are planned for a traveller who changes briskly (the timetable service's "fast" change times, as DB Navigator offers): a change of a few minutes between platforms counts as possible; each walk says its minutes and metres. Walks to the first stop and from the last stop are at normal speed. `departure` / `arrival`: `time` (live when known), `planned`, `delay` (minutes). `minutes`: door to door. `changes`: rides minus one. `dticket`: every ride is valid with the Deutschlandticket. |
 | `legs` | In travel order. A `"ride"` has `line`, `mode` (as on the boards; regional and long-distance trains are one mode, `trains`), `brand`, `destination` (on the vehicle's sign), `dticket`, `replacement`, `from` / `to` (stops as in a departure's stop list, with `platform`, live `time`), `stops` (the ones in between), `path` (`[lat, lon]` points to draw, simplified to about 10 m), `notices` (the operators' messages: `title`, plain-text `text`, `priority` `"normal"`, `"high"` or `"veryHigh"`; texts as the operators write them, mostly German). A `"walk"` has `minutes`, `metres`, `from`, `to`, `path`. |
 | `departure_id`, `board_stop` | The same ride on the departure board of the stop it leaves from: `GET /api/v1/stops/{board_stop}/departures/{departure_id}/stops` gives its live times, its live arrival at every stop ahead, and whether it is cancelled. That is how a client follows a connection. `board_stop` is null for a ride starting outside Baden-Württemberg. |
-| `transfers` | One per change: `at` (where the ride ends), `to` (where the next starts), `walk_minutes` (null: no walk), `needed_minutes` (the walk, else 2 minutes to another platform, 1 on the same), `spare_minutes` (left over with the times given; can be negative), `possible`. |
+| `transfers` | One per change: `at` (where the ride ends), `to` (where the next starts), `walk_minutes` (null: no walk), `needed_minutes` (2, or the walk's minutes when they are more), `spare_minutes` (left over with the times given; can be negative), `possible` (the next ride does not leave first, and the change keeps `needed_minutes` or no less than the timetable plans: a bus planned 1 minute after a tram stays possible until delays shorten that minute). |
 | `empty` | `null` if there are connections. Otherwise why there are none: `"too_close"` (start and destination are the same place), `"no_timetable"` (`when` is outside the timetable period) or `"none"` (the planner found nothing, e.g. at night). |
 
 Errors: `400 invalid_parameter` for a missing or unusable `from` / `to` (not

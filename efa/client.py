@@ -233,18 +233,19 @@ CHANGE_SPEED = "fast"
 
 
 def get_journeys(origin: str, destination: str, start: datetime | None = None, arrive: bool = False,
-                 classes=(), count: int = 5) -> dict:
+                 classes=(), count: int = 5, realtime: bool = True) -> dict:
     """Raw journey-planner response: connections from `origin` to
     `destination`, each a stop id ("de:08111:115") or a point
     ("lat,lon" already turned into EFA's "lon:lat:WGS84[dd.ddddd]" by the
     caller, see `place_param`). `start` (UTC; None: now) is the departure,
     or with `arrive` the latest arrival. `classes`: only these product
-    classes (the D-Ticket switch)."""
+    classes (the D-Ticket switch). `realtime` False: by the timetable alone,
+    as if nothing were late."""
     params = {
         "outputFormat": "rapidJSON",
         "coordOutputFormat": "WGS84[dd.ddddd]",
         "calcNumberOfTrips": count,
-        "useRealtime": 1,
+        "useRealtime": 1 if realtime else 0,
         "type_origin": "coord" if origin.endswith("WGS84[dd.ddddd]") else "any",
         "name_origin": origin,
         "type_destination": "coord" if destination.endswith("WGS84[dd.ddddd]") else "any",

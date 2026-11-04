@@ -115,12 +115,30 @@ class ParseJourneyTest(unittest.TestCase):
         # U15 arrives at +4, a 10 min walk, the train leaves at +14: no minute to spare, possible
         t = parse.parse_journey(journey(change_at=14))["transfers"][0]
         self.assertEqual((t["walk_minutes"], t["needed_minutes"], t["spare_minutes"], t["possible"]), (10, 10, 0, True))
-        # leaving at +13: one minute short
-        t = parse.parse_journey(journey(change_at=13))["transfers"][0]
+        # the U15 a minute late: one minute short
+        late = journey(change_at=14)
+        late["legs"][0]["destination"]["arrivalTimeEstimated"] = at(5)
+        t = parse.parse_journey(late)["transfers"][0]
         self.assertEqual((t["spare_minutes"], t["possible"]), (-1, False))
-        # no walk in between: at least 2 minutes to another platform
+        # no walk in between: at least 2 minutes
         t = parse.parse_journey(journey(change_at=6, walk_minutes=0))["transfers"][0]
         self.assertEqual((t["needed_minutes"], t["spare_minutes"], t["possible"]), (2, 0, True))
+
+    def test_a_change_the_timetable_plans_shorter_is_kept_until_delays_shorten_it(self):
+        """The 2-minute rule is for changes delays squeeze; a bus the timetable
+        plans 1 minute after the tram (operators' own plan) stays possible."""
+        t = parse.parse_journey(journey(change_at=5, walk_minutes=0))["transfers"][0]
+        self.assertEqual((t["needed_minutes"], t["spare_minutes"], t["possible"]), (2, -1, True))
+        # 3 planned minutes, the first ride 2 minutes late: 1 left, under 2
+        squeezed = journey(change_at=7, walk_minutes=0)
+        squeezed["legs"][0]["destination"]["arrivalTimeEstimated"] = at(6)
+        self.assertFalse(parse.parse_journey(squeezed)["transfers"][0]["possible"])
+        # 1 minute late: 2 left, enough
+        squeezed["legs"][0]["destination"]["arrivalTimeEstimated"] = at(5)
+        self.assertTrue(parse.parse_journey(squeezed)["transfers"][0]["possible"])
+        # the next ride leaving before this one arrives: never
+        squeezed["legs"][0]["destination"]["arrivalTimeEstimated"] = at(8)
+        self.assertFalse(parse.parse_journey(squeezed)["transfers"][0]["possible"])
 
     def test_notices_as_plain_text(self):
         notice = parse.parse_journey(journey())["legs"][0]["notices"][0]
@@ -152,8 +170,16 @@ class PlanTest(unittest.TestCase):
         self.rail_asked = []
         self.twin_answer = {"journeys": []}
         self.twin_asked = []
+        self.timetable_answer = {"journeys": []}
+        self.timetable_asked = []
 
-        def fake(origin, destination, start=None, arrive=False, classes=(), count=5):
+        def fake(origin, destination, start=None, arrive=False, classes=(), count=5, realtime=True):
+            # the timetable's own connections, as if nothing were late (see rescued())
+            if not realtime:
+                self.timetable_asked.append((origin, destination, start, arrive, tuple(classes), count))
+                if isinstance(self.timetable_answer, Exception):
+                    raise self.timetable_answer
+                return self.timetable_answer
             # the twins' question: every kind of transport but one
             if classes and count == journeys.RAIL_JOURNEYS and not set(classes) <= set(journeys.WITHOUT_BUSES):
                 self.twin_asked.append((origin, destination, start, arrive, tuple(classes), count))
@@ -175,8 +201,11 @@ class PlanTest(unittest.TestCase):
             raise store.StopsNotImported("test")
         store.in_area = no_db
 
+        self.real_live_ride = journeys.live_ride
+
     def tearDown(self):
         client.get_journeys, departures.stop_importance, store.in_area, departures.outside_timetable = self.real
+        journeys.live_ride = self.real_live_ride
 
     def test_stops_and_points(self):
         result = journeys.plan(PRAG, ULM)
@@ -397,6 +426,76 @@ class PlanTest(unittest.TestCase):
         self.assertEqual([leg.get("minutes") for leg in result["journeys"][0]["legs"] if leg["kind"] == "walk"], [10])
         # the twins' question is held to the same rule
         self.rail_answer, self.twin_answer = {"journeys": []}, {"journeys": [same]}
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+
+    def nordbahnhof(self, first_late, second_late, cancelled=False):
+        """The timetable's connection: U15 arrives at +4, RE5 leaves the same
+        place at +8 (4 minutes to change), arrives at +60; the live answer only
+        has a later one (RE5 at +30, arriving +70). The rides' live times are
+        made up: the U15 `first_late`, the RE5 `second_late` minutes late."""
+        tight = journey(change_at=8, walk_minutes=0)
+        for end in ("arrivalTimePlanned", "arrivalTimeEstimated"):
+            tight["legs"][-1]["destination"][end] = at(60)
+        self.answer = {"journeys": [journey(change_at=30, walk_minutes=0)]}
+        self.timetable_answer = {"journeys": [tight]}
+        asked = []
+
+        def stop(stop_id, minutes, delay):
+            return {"id": stop_id, "name": stop_id, "time": at(minutes + delay), "planned": at(minutes), "delay": delay,
+                    "realtime": True, "cancelled": cancelled and stop_id == ULM}
+
+        def fake_live(ride):
+            asked.append(ride)
+            stop_id, departure = ride
+            if stop_id == PRAG:
+                trip = {"here": stop(PRAG, 0, first_late), "onward": [stop("de:08111:6112", 4, first_late)]}
+            else:
+                trip = {"here": stop("de:08111:6115", 8, second_late), "onward": [stop(ULM, 60, second_late)]}
+            return {"stop": stop_id, "id": departure, "ok": True, "trip": trip}
+        journeys.live_ride = fake_live
+        return journeys.plan(PRAG, ULM), asked
+
+    def test_a_change_a_delay_made_too_short_for_the_planner_is_offered_when_it_still_works(self):
+        """Nordbahnhof, 4 November 2026: S4 3 late, U12 2 late, 4 planned minutes
+        became 3; the planner (its own minimum there 4) dropped it, DB kept it."""
+        result, asked = self.nordbahnhof(3, 2)
+        self.assertEqual(len(self.timetable_asked), 1)
+        self.assertEqual(len(asked), 2)
+        self.assertEqual(len(result["journeys"]), 2)
+        tight = next(j for j in result["journeys"] if j["arrival"]["planned"] == at(60))
+        self.assertEqual((tight["departure"]["time"], tight["arrival"]["time"], tight["arrival"]["delay"]), (at(3), at(62), 2))
+        rides = [leg for leg in tight["legs"] if leg["kind"] == "ride"]
+        self.assertEqual((rides[0]["to"]["time"], rides[1]["from"]["time"]), (at(7), at(10)))
+        self.assertEqual((tight["transfers"][0]["spare_minutes"], tight["transfers"][0]["possible"]), (1, True))
+        self.assertNotIn("_classes", tight)
+
+    def test_a_change_squeezed_under_two_minutes_is_not_offered(self):
+        result, _ = self.nordbahnhof(3, 0)       # 1 minute left
+        self.assertEqual(len(result["journeys"]), 1)
+        result, _ = self.nordbahnhof(5, 0)       # the next ride leaves before this one arrives
+        self.assertEqual(len(result["journeys"]), 1)
+        result, _ = self.nordbahnhof(0, 0, cancelled=True)
+        self.assertEqual(len(result["journeys"]), 1)
+
+    def test_the_timetable_is_asked_only_where_live_times_exist(self):
+        self.nordbahnhof(3, 2)
+        self.timetable_asked.clear()
+        journeys.plan(PRAG, ULM, datetime.now(timezone.utc) + timedelta(hours=5))
+        self.assertEqual(self.timetable_asked, [])
+        # the same rides as the live answer's: nothing to look up
+        self.answer = self.timetable_answer = {"journeys": [journey()]}
+        asked = []
+        journeys.live_ride = lambda ride: asked.append(ride)
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+        self.assertEqual(asked, [])
+        # no timetable answer: the list goes without
+        self.timetable_answer = client.EfaError("down")
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+
+    def test_a_ride_that_cannot_be_checked_is_not_offered(self):
+        self.nordbahnhof(3, 2)
+        journeys.live_ride = lambda ride: {"stop": ride[0], "id": ride[1], "ok": False,
+                                           "error": {"code": "unknown_departure", "message": "gone"}}
         self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
 
     def test_alternatives_are_a_bonus(self):

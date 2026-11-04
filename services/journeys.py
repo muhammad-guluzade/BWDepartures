@@ -9,7 +9,7 @@ map, or the user's location)."""
 import logging
 import re
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 
 from efa import client, parse
@@ -117,23 +117,25 @@ def in_baden_wuerttemberg(lat: float, lon: float) -> bool:
 LIVE_RIDES_MAX = 8
 
 
+def live_ride(ride: tuple) -> dict:
+    """(board_stop, departure_id) -> {stop, id, ok: True, trip} with the ride's
+    live times (its stops ahead with their live arrivals, cancelled or not), or
+    {stop, id, ok: False, error: {code, message}}."""
+    stop, departure = ride
+    try:
+        return {"stop": stop, "id": departure, "ok": True, "trip": departures.trip(stop, departure, fresh=True)}
+    except departures.UnknownDeparture:
+        return {"stop": stop, "id": departure, "ok": False,
+                "error": {"code": "unknown_departure", "message": "This departure is no longer known."}}
+    except client.EfaError:
+        return {"stop": stop, "id": departure, "ok": False,
+                "error": {"code": "timetable_unavailable", "message": "The timetable service is not responding."}}
+
+
 def live_rides(rides: list) -> list:
-    """[(board_stop, departure_id), ...] -> one answer per ride, in order:
-    {stop, id, ok: True, trip} with the ride's live times (its stops ahead
-    with their live arrivals, cancelled or not), or {stop, id, ok: False,
-    error: {code, message}}. Asked side by side; one ride's trouble does not
-    spoil the others'."""
-    def one(ride):
-        stop, departure = ride
-        try:
-            return {"stop": stop, "id": departure, "ok": True, "trip": departures.trip(stop, departure, fresh=True)}
-        except departures.UnknownDeparture:
-            return {"stop": stop, "id": departure, "ok": False,
-                    "error": {"code": "unknown_departure", "message": "This departure is no longer known."}}
-        except client.EfaError:
-            return {"stop": stop, "id": departure, "ok": False,
-                    "error": {"code": "timetable_unavailable", "message": "The timetable service is not responding."}}
-    return list(_pool.map(one, rides))
+    """[(board_stop, departure_id), ...] -> one live_ride() answer per ride, in
+    order. Asked side by side; one ride's trouble does not spoil the others'."""
+    return list(_pool.map(live_ride, rides))
 
 
 def town_in_bw(data: dict, end: str) -> bool | None:
@@ -293,6 +295,131 @@ def twins(asked_from: str, asked_to: str, start: datetime | None, dticket: bool,
     return sorted(found, key=lambda j: j["arrival"]["time"] or "")[:TWINS_MAX]
 
 
+# ---------- changes a delay made too short for the planner ----------
+# The planner, asked with live times, leaves out a connection whose change a
+# delay squeezed below the planner's own minimum for that stop, even when the
+# change can still be made. Rosenackerweg -> Mühlhausen, 4 November 2026: the S4
+# 3 minutes late, the U12 2 minutes late at Nordbahnhof, so 4 planned minutes
+# became 3, under the planner's 4 there; it offered the next U12, DB Navigator
+# kept this one and the traveller caught it. So the timetable's connections are
+# asked for as well, and one the live answer lost is looked at with its rides'
+# live times: it is offered when every change can still be made by our own rule
+# (parse.change_possible: 2 minutes, or the walk, or no less than planned).
+LIVE_BEFORE_MINUTES = 60    # live times are known from about an hour ago ...
+LIVE_AHEAD_MINUTES = 180    # ... to three hours ahead; outside that the two answers are the same
+RESCUED_MAX = 3             # connections looked at per search, the soonest arriving
+TIMETABLE_WAIT = 4          # seconds to wait for the timetable's answer once the live one is in
+LIVE_TIMES_WAIT = 5         # seconds for the rides' live times
+
+
+def live_matters(start: datetime | None) -> bool:
+    if start is None:
+        return True
+    minutes = (start - datetime.now(timezone.utc)).total_seconds() / 60
+    return -LIVE_BEFORE_MINUTES <= minutes <= LIVE_AHEAD_MINUTES
+
+
+def moved(place: dict, seconds: float) -> dict:
+    """A walk's end, moved by as much as the ride it hangs on."""
+    planned = parse.parse_time(place.get("planned"))
+    old = parse.parse_time(place.get("time"))
+    if not old or not seconds:
+        return place
+    new = old + timedelta(seconds=seconds)
+    return {**place, "time": parse.iso(new), "delay": parse.whole_minutes(new - planned) if planned else place.get("delay")}
+
+
+def live_place(stop: dict) -> dict:
+    return {"time": stop["time"], "delay": stop.get("delay"), "realtime": bool(stop.get("realtime")),
+            "cancelled": bool(stop.get("cancelled"))}
+
+
+def with_live_times(journey: dict, answers: list) -> dict | None:
+    """The connection with its rides' live times (`answers`: live_ride() for
+    each ride, in order), or None when a ride cannot be checked, is cancelled,
+    or a change can no longer be made."""
+    legs = [dict(leg) for leg in journey["legs"]]
+    ride_at = [i for i, leg in enumerate(legs) if leg["kind"] == "ride"]
+    if not ride_at or len(answers) != len(ride_at):
+        return None
+    leaving_moved, arriving_moved = {}, {}
+    for i, answer in zip(ride_at, answers):
+        if not answer.get("ok"):
+            return None
+        leg, trip = legs[i], answer["trip"]
+        here = trip["here"]
+        off = next((stop for stop in trip.get("onward") or [] if stop["id"] == leg["to"]["id"]), None)
+        if here.get("cancelled") or not off or off.get("cancelled") or not here.get("time") or not off.get("time"):
+            return None
+        ahead = {stop["id"]: stop for stop in trip.get("onward") or []}
+        old_from, old_to = parse.parse_time(leg["from"]["time"]), parse.parse_time(leg["to"]["time"])
+        leg["from"] = {**leg["from"], **live_place(here)}
+        leg["to"] = {**leg["to"], **live_place(off)}
+        leg["stops"] = [{**stop, **live_place(ahead[stop["id"]])} if stop["id"] in ahead and ahead[stop["id"]].get("time") else stop
+                        for stop in leg.get("stops") or []]
+        leaving_moved[i] = (parse.parse_time(here["time"]) - old_from).total_seconds() if old_from else 0
+        arriving_moved[i] = (parse.parse_time(off["time"]) - old_to).total_seconds() if old_to else 0
+    for i, leg in enumerate(legs):
+        if leg["kind"] != "walk":
+            continue
+        before = [r for r in ride_at if r < i]
+        seconds = arriving_moved[before[-1]] if before else leaving_moved[min(r for r in ride_at if r > i)]
+        leg["from"], leg["to"] = moved(leg["from"], seconds), moved(leg["to"], seconds)
+    transfers = parse.transfers_of(legs)
+    if not all(t["possible"] for t in transfers):
+        return None
+    first, last = legs[0]["from"], legs[-1]["to"]
+    leaves, arrives = parse.parse_time(first["time"]), parse.parse_time(last["time"])
+    return {**journey, "legs": legs, "transfers": transfers,
+            "departure": {"time": first["time"], "planned": first["planned"], "delay": first.get("delay")},
+            "arrival": {"time": last["time"], "planned": last["planned"], "delay": last.get("delay")},
+            "minutes": parse.whole_minutes(arrives - leaves) if leaves and arrives else journey.get("minutes")}
+
+
+def rescued(timetable_asked, journeys: list, latest: str, importance: dict, dticket: bool) -> list:
+    """The timetable's connections with a change that the live answer lost
+    and that can still be made (see above); [] when none, or no answer in time."""
+    if timetable_asked is None or not journeys or not latest:
+        return []
+    try:
+        data = timetable_asked.result(timeout=TIMETABLE_WAIT)
+    except Exception:  # noqa: BLE001 -- no answer, or too late: the list goes without
+        return []
+    known = {j["id"] for j in journeys} | {rides(j) for j in journeys}
+
+    def beaten(candidate):
+        # a connection already listed leaves no earlier and arrives no later
+        return any((j["departure"]["time"] or "") >= (candidate["departure"]["planned"] or "9")
+                   and (j["arrival"]["time"] or "9") <= (candidate["arrival"]["planned"] or "") for j in journeys)
+
+    candidates = [j for j in read_journeys(data, importance, dticket)
+                  if j["changes"] and j["id"] not in known and rides(j) not in known
+                  and (j["departure"]["planned"] or "9") <= latest and not beaten(j)
+                  and all(leg["board_stop"] for leg in j["legs"] if leg["kind"] == "ride")]
+    candidates = sorted(candidates, key=lambda j: j["arrival"]["planned"] or "")[:RESCUED_MAX]
+    if not candidates:
+        return []
+    asked = {}
+    for j in candidates:
+        for leg in j["legs"]:
+            if leg["kind"] == "ride":
+                key = (leg["board_stop"], leg["departure_id"])
+                if key not in asked:
+                    asked[key] = _pool.submit(live_ride, key)
+    done, _ = wait(list(asked.values()), timeout=LIVE_TIMES_WAIT)
+    found = []
+    for j in candidates:
+        keys = [(leg["board_stop"], leg["departure_id"]) for leg in j["legs"] if leg["kind"] == "ride"]
+        if not all(asked[key] in done for key in keys):
+            continue
+        live = with_live_times(j, [asked[key].result() for key in keys])
+        if live:
+            found.append(live)
+    if found:
+        log.info("%d connection(s) offered again whose change a delay made tight", len(found))
+    return found
+
+
 def plan(origin: str, destination: str, start: datetime | None = None, arrive: bool = False, dticket: bool = False) -> dict:
     """{from, to, when, arrive, dticket, journeys: [...], empty}. `start` is
     a UTC moment (None: now): the departure, or with `arrive` the latest
@@ -301,8 +428,11 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
     asked_to, end_place = place(destination, "to")
     rail_classes = [c for c in WITHOUT_BUSES if not dticket or c in DTICKET_CLASSES]
     rail_asked = _pool.submit(client.get_journeys, asked_from, asked_to, start, arrive, rail_classes, RAIL_JOURNEYS)
-    data = client.get_journeys(asked_from, asked_to, start, arrive, DTICKET_CLASSES if dticket else (),
-                               JOURNEYS_DTICKET if dticket else JOURNEYS)
+    main_classes, main_count = (DTICKET_CLASSES if dticket else ()), (JOURNEYS_DTICKET if dticket else JOURNEYS)
+    # (the timetable's own connections: see rescued())
+    timetable_asked = (_pool.submit(client.get_journeys, asked_from, asked_to, start, arrive, main_classes, main_count, realtime=False)
+                       if live_matters(start) else None)
+    data = client.get_journeys(asked_from, asked_to, start, arrive, main_classes, main_count)
     try:
         rail_data = rail_asked.result()
     except client.EfaError:
@@ -315,6 +445,7 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
     importance = departures.stop_importance()
     journeys = read_journeys(data, importance, dticket)
     known = {j["id"] for j in journeys} | {rides(j) for j in journeys}
+    latest_departure = max((j["departure"]["planned"] or "" for j in journeys), default="")
     latest = max((j["arrival"]["time"] or "" for j in journeys), default="")
     limit = (datetime.strptime(latest, "%Y-%m-%dT%H:%M:%SZ") + timedelta(minutes=RAIL_LATER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ") if latest else ""
     # (a ride at least: a long walk is no alternative; not much later than the others)
@@ -323,6 +454,7 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
              and worth_adding(j, journeys)]
     # the ones arriving soonest; the list is put in order below
     journeys += sorted(extra, key=lambda j: j["arrival"]["time"] or "")[:RAIL_ALTERNATIVES]
+    journeys += rescued(timetable_asked, journeys, latest_departure, importance, dticket)
     journeys = in_time(journeys, start, arrive)
     journeys = [j for j in journeys if not needless_walk(j, journeys)]
     if journeys and not arrive:
