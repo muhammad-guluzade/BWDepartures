@@ -145,6 +145,44 @@ class ParseJourneyTest(unittest.TestCase):
             t = parse.transfers_of(other)[0]
             self.assertEqual((t["needed_minutes"], t["possible"]), (2, False))
 
+    def test_the_planner_s_walk_inside_the_station(self):
+        """S-Bahn 101 -> 102 at Stuttgart Hbf (tief): one island, the planner says
+        0 seconds: nothing needed. Ludwigsburg trains -> ZOB: 120 seconds, 2
+        minutes. One minute counts as 2 (the user's rule)."""
+        def legs(platform_out="102"):
+            place = lambda code, time: {"id": "de:08111:6118", "name": "Hauptbahnhof (tief)", "platform": {"code": code},
+                                        "time": at(time), "planned": at(time)}
+            return [{"kind": "ride", "from": {}, "to": place("101", 10)}, {"kind": "ride", "from": place(platform_out, 11), "to": {}}]
+        for seconds, needed in ((0, 0), (60, 2), (120, 2), (150, 3), (None, 2)):
+            t = parse.transfers_of(legs(), [seconds])[0]
+            self.assertEqual((t["needed_minutes"], t["possible"]), (needed, True), seconds)
+        # the same platform needs nothing, whatever the planner says
+        self.assertEqual(parse.transfers_of(legs("101"), [60])[0]["needed_minutes"], 0)
+        # read from the planner's answer: footPathInfo after the ride (or before the next one)
+        for leg_index, position in ((0, "AFTER"), (-1, "BEFORE")):
+            raw = journey(change_at=6, walk_minutes=0)
+            raw["legs"][leg_index]["footPathInfo"] = [{"position": position, "duration": 0}]
+            self.assertEqual(parse.parse_journey(raw)["transfers"][0]["needed_minutes"], 0, position)
+            raw["legs"][leg_index]["footPathInfo"] = [{"position": position, "duration": 240}]
+            self.assertEqual(parse.parse_journey(raw)["transfers"][0]["needed_minutes"], 4, position)
+        # a walk leg between the rides (another stop) has the last word
+        raw = journey(change_at=14)
+        raw["legs"][0]["footPathInfo"] = [{"position": "AFTER", "duration": 0}]
+        self.assertEqual(parse.parse_journey(raw)["transfers"][0]["needed_minutes"], 10)
+
+    def test_changes_are_compared_to_the_second(self):
+        """The next ride leaving 30 seconds before this one arrives is gone (it
+        counted as 0 minutes before); 1 minute 30 left shows as 1 to spare."""
+        def legs(arrives_seconds_late, leaves=25):
+            arrival = (LATER + timedelta(minutes=25, seconds=arrives_seconds_late)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            place = lambda code, time, planned: {"id": "de:08111:6056", "name": "Charlottenplatz", "platform": {"code": code},
+                                                 "time": time, "planned": planned}
+            return [{"kind": "ride", "from": {}, "to": place("4", arrival, at(23))},
+                    {"kind": "ride", "from": place("4", at(leaves), at(leaves)), "to": {}}]
+        self.assertFalse(parse.transfers_of(legs(30))[0]["possible"])
+        t = parse.transfers_of(legs(-90))[0]
+        self.assertEqual((t["needed_minutes"], t["spare_minutes"], t["possible"]), (0, 1, True))
+
     def test_a_change_the_timetable_plans_shorter_is_kept_until_delays_shorten_it(self):
         """The 2-minute rule is for changes delays squeeze; a bus the timetable
         plans 1 minute after the tram (operators' own plan) stays possible."""

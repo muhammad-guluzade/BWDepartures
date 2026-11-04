@@ -365,7 +365,7 @@ def with_live_times(journey: dict, answers: list) -> dict | None:
         before = [r for r in ride_at if r < i]
         seconds = arriving_moved[before[-1]] if before else leaving_moved[min(r for r in ride_at if r > i)]
         leg["from"], leg["to"] = moved(leg["from"], seconds), moved(leg["to"], seconds)
-    transfers = parse.transfers_of(legs)
+    transfers = parse.transfers_of(legs, needed_given=[t["needed_minutes"] for t in journey.get("transfers") or []])
     if not all(t["possible"] for t in transfers):
         return None
     first, last = legs[0]["from"], legs[-1]["to"]
