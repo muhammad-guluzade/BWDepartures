@@ -124,6 +124,27 @@ class ParseJourneyTest(unittest.TestCase):
         t = parse.parse_journey(journey(change_at=6, walk_minutes=0))["transfers"][0]
         self.assertEqual((t["needed_minutes"], t["spare_minutes"], t["possible"]), (2, 0, True))
 
+    def test_on_the_same_platform_a_change_needs_no_minutes(self):
+        """U12 -> U15 at Charlottenplatz, both platform 4: one steps across. Only
+        the next ride leaving before this one arrives makes it impossible."""
+        def legs(arrives, leaves, planned_arrival, planned_leaving, leaving_platform="4", leaving_stop="de:08111:6056"):
+            place = lambda stop, code, time, planned: {"id": stop, "name": "Charlottenplatz", "platform": {"code": code},
+                                                       "time": at(time), "planned": at(planned)}
+            return [{"kind": "ride", "from": {}, "to": place("de:08111:6056", "4", arrives, planned_arrival)},
+                    {"kind": "ride", "from": place(leaving_stop, leaving_platform, leaves, planned_leaving), "to": {}}]
+        # 3 planned minutes, the U12 2 minutes late: 1 left, enough here
+        t = parse.transfers_of(legs(24, 25, 22, 25))[0]
+        self.assertEqual((t["needed_minutes"], t["spare_minutes"], t["possible"]), (0, 1, True))
+        # arriving the very minute the U15 leaves: still possible
+        self.assertTrue(parse.transfers_of(legs(25, 25, 22, 25))[0]["possible"])
+        # the U15 gone before the U12 arrives: missed
+        self.assertFalse(parse.transfers_of(legs(26, 25, 22, 25))[0]["possible"])
+        # another platform of the same stop, or another stop: 2 minutes, as before
+        for other in (legs(24, 25, 22, 25, leaving_platform="2"), legs(24, 25, 22, 25, leaving_stop="de:08111:6115"),
+                      legs(24, 25, 22, 25, leaving_platform="")):
+            t = parse.transfers_of(other)[0]
+            self.assertEqual((t["needed_minutes"], t["possible"]), (2, False))
+
     def test_a_change_the_timetable_plans_shorter_is_kept_until_delays_shorten_it(self):
         """The 2-minute rule is for changes delays squeeze; a bus the timetable
         plans 1 minute after the tram (operators' own plan) stays possible."""

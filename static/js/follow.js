@@ -147,8 +147,8 @@
       if (!a || !b) return t;
       const plannedGap = (ms(b.from.planned) - ms(a.to.planned)) / 60000;
       const gap = (ms(b.from.time) - ms(a.to.time)) / 60000;
-      // (at least 2 minutes, as the server counts since 4 November 2026; a connection followed before keeps 1)
-      const needed = Math.max(2, t.needed_minutes || 0);
+      // (as the server counts: 0 on the same platform, else 2 or the walk; 2 when it does not say)
+      const needed = Number.isFinite(t.needed_minutes) ? t.needed_minutes : 2;
       const spare = Math.floor(gap - needed);
       // missed: the next ride leaves before this one arrives, or the time for the change shrank below what it
       // needs (a change the planner planned tighter than our rule is not called missed while it stays as planned)

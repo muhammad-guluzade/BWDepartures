@@ -1065,6 +1065,8 @@
 
   function transferText(t) {
     if (!t || t.spare_minutes === null) return null;
+    // a change on the same platform needs no minutes of its own
+    if (t.possible && t.needed_minutes === 0) return el('span', 'ok', `${t.spare_minutes} min to change, same platform`);
     // a change the timetable itself plans under the usual minutes (a bus waiting for the tram) is possible
     if (t.possible && t.spare_minutes < 0) return el('span', 'ok', `${t.spare_minutes + t.needed_minutes} min to change`);
     if (t.possible) return el('span', 'ok', `${t.spare_minutes} min to spare`);

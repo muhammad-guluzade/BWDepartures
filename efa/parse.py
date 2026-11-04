@@ -751,10 +751,12 @@ def parse_departure(event: dict, now: datetime | None = None, importance: dict |
 # address or a point on the map, 99 between two stations (Arnulf-Klett-Platz
 # to the Hauptbahnhof)
 WALK_CLASSES = {99, 100}
-# The least time a change needs (the user's rule, 4 November 2026): 2 minutes,
-# or the walk's own minutes when a walk leg is longer. A change the timetable
-# itself plans shorter (a bus waiting for a tram at the same stop, 1 minute) is
-# kept as long as delays do not make it shorter still.
+# The least time a change needs (the user's rules, 4 November 2026): 2 minutes,
+# or the walk's own minutes when a walk leg is longer; nothing on the same
+# platform of the same stop (U12 -> U15 at Charlottenplatz: one steps across),
+# where only the next ride must not leave before this one arrives. A change the
+# timetable itself plans shorter (a bus waiting for a tram, 1 minute) is kept as
+# long as delays do not make it shorter still.
 CHANGE_MINUTES = 2
 
 
@@ -858,10 +860,21 @@ def simplify(points: list, tolerance: float) -> list:
     return [point for point, kept in zip(points, keep) if kept]
 
 
-def change_minutes_needed(walk: dict | None) -> int:
-    """The least time a change takes: CHANGE_MINUTES, or the walk's minutes
-    when they are more."""
-    return max(CHANGE_MINUTES, walk["minutes"] if walk else 0)
+def change_minutes_needed(walk: dict | None, arriving: dict | None = None, leaving: dict | None = None) -> int:
+    """The least time a change takes: the walk's minutes (CHANGE_MINUTES at
+    least) when the planner gives a walk; 0 on the same platform of the same
+    stop; else CHANGE_MINUTES."""
+    if walk:
+        return max(CHANGE_MINUTES, walk["minutes"])
+    if arriving and leaving and same_platform(arriving, leaving):
+        return 0
+    return CHANGE_MINUTES
+
+
+def same_platform(arriving: dict, leaving: dict) -> bool:
+    """The same stop and the same platform number (an unknown platform is never the same)."""
+    code = (arriving.get("platform") or {}).get("code")
+    return bool(arriving.get("id")) and arriving.get("id") == leaving.get("id")         and bool(code) and code == (leaving.get("platform") or {}).get("code")
 
 
 def change_possible(gap: float, planned_gap: float | None, needed: int) -> bool:
@@ -888,7 +901,7 @@ def transfers_of(legs: list) -> list:
         walk = {"minutes": sum(w["minutes"] for w in walks)} if walks else None
         arrival, leaving = parse_time(leg["to"]["time"]), parse_time(nxt["from"]["time"])
         planned_arrival, planned_leaving = parse_time(leg["to"]["planned"]), parse_time(nxt["from"]["planned"])
-        needed = change_minutes_needed(walk)
+        needed = change_minutes_needed(walk, leg["to"], nxt["from"])
         gap = whole_minutes(leaving - arrival) if arrival and leaving else None
         planned_gap = whole_minutes(planned_leaving - planned_arrival) if planned_arrival and planned_leaving else None
         transfers.append({"at": leg["to"]["name"], "to": nxt["from"]["name"], "walk_minutes": walk["minutes"] if walk else None,
