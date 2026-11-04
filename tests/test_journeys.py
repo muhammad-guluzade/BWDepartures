@@ -386,6 +386,19 @@ class PlanTest(unittest.TestCase):
         journeys.plan(PRAG, ULM, dticket=True)
         self.assertNotIn(16, self.rail_asked[0][4])
 
+    def test_the_same_rides_with_another_walk_are_shown_once(self):
+        """Albstadt -> Sigmaringen: the train-only question walked 5 minutes to the
+        RE6a the first answer reaches in 3; DB shows that train once."""
+        same = journey(walk_minutes=6)
+        self.assertNotEqual(parse.parse_journey(same, {})["id"], parse.parse_journey(journey(), {})["id"])
+        self.rail_answer = {"journeys": [same]}
+        result = journeys.plan(PRAG, ULM)
+        self.assertEqual(len(result["journeys"]), 1)
+        self.assertEqual([leg.get("minutes") for leg in result["journeys"][0]["legs"] if leg["kind"] == "walk"], [10])
+        # the twins' question is held to the same rule
+        self.rail_answer, self.twin_answer = {"journeys": []}, {"journeys": [same]}
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+
     def test_alternatives_are_a_bonus(self):
         # its question failing, the first answer is shown alone
         self.rail_answer = client.EfaError("down")

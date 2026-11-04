@@ -196,6 +196,15 @@ def longest_walk(journey: dict) -> int:
     return max((leg.get("minutes") or 0 for leg in journey["legs"] if leg["kind"] == "walk"), default=0)
 
 
+def rides(journey: dict) -> tuple:
+    """The rides of a connection (line, where and when each one is boarded and
+    left): two connections with the same rides differ only in their walks (the
+    train-only question can walk 5 minutes to a train the first answer reaches
+    in 3), and such a pair is shown once."""
+    return tuple((leg.get("line"), leg["from"].get("id"), leg["from"].get("planned"), leg["to"].get("id"), leg["to"].get("planned"))
+                 for leg in journey["legs"] if leg["kind"] == "ride")
+
+
 def worth_adding(alternative: dict, journeys: list) -> bool:
     """Is a connection without buses worth showing next to the first answer's?
     Not when one of those leaves no earlier and arrives much sooner, nor when it
@@ -280,7 +289,7 @@ def twins(asked_from: str, asked_to: str, start: datetime | None, dticket: bool,
         return later <= TWIN_LATER_MINUTES or (apart <= TWIN_DEPARTURE_MINUTES and later < slower)
 
     found = [j for j in in_time(read_journeys(data, importance, dticket), start, False)
-             if j["id"] not in known and any(leg["kind"] == "ride" for leg in j["legs"]) and taken(j)]
+             if j["id"] not in known and rides(j) not in known and any(leg["kind"] == "ride" for leg in j["legs"]) and taken(j)]
     return sorted(found, key=lambda j: j["arrival"]["time"] or "")[:TWINS_MAX]
 
 
@@ -305,11 +314,11 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
             raise InvalidPlace(f"{which} is outside Baden-Württemberg")
     importance = departures.stop_importance()
     journeys = read_journeys(data, importance, dticket)
-    known = {j["id"] for j in journeys}
+    known = {j["id"] for j in journeys} | {rides(j) for j in journeys}
     latest = max((j["arrival"]["time"] or "" for j in journeys), default="")
     limit = (datetime.strptime(latest, "%Y-%m-%dT%H:%M:%SZ") + timedelta(minutes=RAIL_LATER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ") if latest else ""
     # (a ride at least: a long walk is no alternative; not much later than the others)
-    extra = [j for j in read_journeys(rail_data, importance, dticket) if j["id"] not in known
+    extra = [j for j in read_journeys(rail_data, importance, dticket) if j["id"] not in known and rides(j) not in known
              and any(leg["kind"] == "ride" for leg in j["legs"]) and (not limit or (j["arrival"]["time"] or "") <= limit)
              and worth_adding(j, journeys)]
     # the ones arriving soonest; the list is put in order below
@@ -317,7 +326,7 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
     journeys = in_time(journeys, start, arrive)
     journeys = [j for j in journeys if not needless_walk(j, journeys)]
     if journeys and not arrive:
-        known = {j["id"] for j in journeys}
+        known = {j["id"] for j in journeys} | {rides(j) for j in journeys}
         journeys += twins(asked_from, asked_to, start, dticket, importance, journeys, known)
     for journey in journeys:
         journey.pop("_classes", None)
