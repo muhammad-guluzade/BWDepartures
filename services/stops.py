@@ -187,6 +187,41 @@ def exact_houses_first(query: str, places: list) -> list:
     return places
 
 
+def next_door_house(query: str, places: list) -> list:
+    """A house number the timetable service does not know ("Königstraße 1" in
+    Stuttgart: it knows 1A, 1B and 2, and offered "Königstraße 9/1" instead):
+    the house with an "A" is asked for, the one next door. [] when the house
+    typed was found, or there is no such neighbour."""
+    number = HOUSE_NUMBER.search(query)
+    if not number or not number.group(1).isdigit():
+        return []
+    typed = same_spelling(query)
+    addresses = [p for p in places if p["kind"] == "address" and ", " in p["name"]]
+    if any(same_spelling(p["name"].split(", ", 1)[1]) in typed for p in addresses):
+        return []   # the house itself is there
+    street_typed = same_spelling(query[:number.start()])
+    for p in addresses:
+        town, road = p["name"].split(", ", 1)
+        street = HOUSE_NUMBER.sub("", road).strip(" /")
+        if not street or same_spelling(street) not in street_typed:
+            continue
+        wanted = same_spelling(f"{street} {number.group(1)}a")
+        try:
+            points = parse.extract_points(client.find_stops(f"{street} {number.group(1)}A {town}"))
+        except client.EfaError:
+            return []
+        for point in points:
+            try:
+                found = parse.parse_place(point)
+            except Exception:  # noqa: BLE001
+                continue
+            if found and found["kind"] == "address" and same_spelling(found["name"].split(", ", 1)[-1]) == wanted:
+                found["score"] = round(p["score"] * 1.02, 4)
+                return [found]
+        return []
+    return []
+
+
 def route_search(query: str, near: str = "", radius: str = "", limit: str = "") -> dict:
     """The navigator's search (`places=1`): {stops, places, results}.
     `stops` as search() gives them; `places` the sights, addresses and
@@ -206,7 +241,8 @@ def route_search(query: str, near: str = "", radius: str = "", limit: str = "") 
         points = []
     places = ranked_places(points, place, radius_km)
     how_many = STREETS_FOR_A_NUMBER if place and radius_km < WIDE_MAP_KM else STREETS_FOR_A_NUMBER_ANYWHERE
-    places = sorted(exact_houses_first(query, house_numbers(query, places, how_many) + places), key=lambda p: (-p["score"], p["name"]))[:PLACES_LIMIT]
+    places = exact_houses_first(query, house_numbers(query, places, how_many) + places)
+    places = sorted(next_door_house(query, places) + places, key=lambda p: (-p["score"], p["name"]))[:PLACES_LIMIT]
     stops = public_stops(ranked)
     mixed = [(c["score"], {"type": "stop", **s}) for c, s in zip(ranked, stops)]
     mixed += [(p["score"], {"type": "place", **{k: v for k, v in p.items() if k != "score"}}) for p in places]
@@ -339,9 +375,47 @@ def ranked_stops(query: str, place: tuple | None, radius_km: float, count: int, 
                                   "partial": False}
 
     ranked = sorted(candidates.values(), key=lambda c: (-c["score"], c["name"], c["id"]))
+    main = town_station(query, ranked)
+    if main is not None:
+        main["score"] = round(ranked[0]["score"] * 1.02, 4)
+        ranked.sort(key=lambda c: (-c["score"], c["name"], c["id"]))
     if ranked:
         ranked = [c for c in ranked if c["score"] >= stop_index.WORTH_SHOWING * ranked[0]["score"]]
     return ranked[:count]
+
+
+# Only a town typed ("Esslingen (Neckar)", "Rottenburg (Neckar)", "Waldshut"): its
+# main station comes first, as in DB Navigator - not a stop whose name shares a word
+# ("Esslingen (Neckar), Neckar Forum"), a district (Ergenzingen) or the bus station
+# (6 November 2026). The main station: the town's stop with trains or S-Bahn that
+# matters most, else the one that matters most.
+TOWN_FILLERS = {"am", "an", "der", "im", "in", "bei", "ob", "unter", "a", "d", "i"}
+RAIL_TYPES = {"trains", "sbahn"}
+
+
+def town_words(text: str) -> list:
+    return [w for w in stop_index.fold(text).split() if w not in TOWN_FILLERS]
+
+
+def town_station(query: str, ranked: list) -> dict | None:
+    """The main station of the town the words name, among the stops found;
+    None when the words are more than a town's name."""
+    asked = town_words(query)
+    if not asked:
+        return None
+    of_town = []
+    for c in ranked:
+        if ", " in c["name"]:
+            town = town_words(c["name"].split(", ", 1)[0])
+            # every word typed is the town's, and its first word is among them ("Freiburg" for Freiburg im Breisgau)
+            if town and set(asked) <= set(town) and town[0] in asked:
+                of_town.append(c)
+        elif town_words(c["name"])[:len(asked)] == asked:
+            of_town.append(c)   # a name in the timetable file's style, the town first ("Stuttgart Hauptbahnhof (oben)")
+    if not of_town:
+        return None
+    rail = [c for c in of_town if RAIL_TYPES & {t["id"] for t in c["types"]}]
+    return max(rail or of_town, key=lambda c: (known_importance(c["id"]) or 0, c["score"]))
 
 
 def public_stops(ranked: list) -> list:

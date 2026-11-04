@@ -405,3 +405,72 @@ class CombinedSearchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TownStationTest(unittest.TestCase):
+    """Only a town typed: its main station first, as DB Navigator does (6 November 2026)."""
+
+    def setUp(self):
+        self.real = stops.known_importance
+        weights = {"bus": 30.0, "rail": 20.0, "forum": 5.0, "district": 8.0, "hbf": 60.0, "cannstatt": 40.0}
+        stops.known_importance = lambda stop_id: weights.get(stop_id)
+
+    def tearDown(self):
+        stops.known_importance = self.real
+
+    @staticmethod
+    def stop(stop_id, name, rail=False, score=1.0):
+        return {"id": stop_id, "name": name, "score": score,
+                "types": [{"id": "trains", "name": "Trains"}] if rail else [{"id": "bus", "name": "Bus"}]}
+
+    def test_the_station_with_trains_not_the_bus_station(self):
+        ranked = [self.stop("bus", "Waldshut, Busbahnhof", score=1.0), self.stop("rail", "Waldshut, Bahnhof", rail=True, score=0.9)]
+        self.assertEqual(stops.town_station("Waldshut", ranked)["id"], "rail")
+
+    def test_a_word_shared_with_a_stop_does_not_win(self):
+        ranked = [self.stop("forum", "Esslingen (Neckar), Neckar Forum"), self.stop("rail", "Esslingen (Neckar), Bahnhof", rail=True, score=0.8)]
+        self.assertEqual(stops.town_station("Esslingen (Neckar)", ranked)["id"], "rail")
+        # "am Neckar" and "(Neckar)" are one town; a district of another name is not it
+        ranked = [self.stop("district", "Ergenzingen, Ergenzingen", rail=True), self.stop("rail", "Rottenburg am Neckar, Rottenburg", rail=True, score=0.7)]
+        self.assertEqual(stops.town_station("Rottenburg (Neckar)", ranked)["id"], "rail")
+
+    def test_names_with_the_town_first_count_too(self):
+        ranked = [self.stop("cannstatt", "Stuttgart, Bad Cannstatt", rail=True), self.stop("hbf", "Stuttgart Hauptbahnhof (oben)", rail=True, score=0.9)]
+        self.assertEqual(stops.town_station("Stuttgart", ranked)["id"], "hbf")
+        self.assertEqual(stops.town_station("Freiburg", [self.stop("rail", "Freiburg im Breisgau, Hauptbahnhof", rail=True)])["id"], "rail")
+
+    def test_more_than_a_town_is_left_alone(self):
+        ranked = [self.stop("forum", "Esslingen (Neckar), Neckar Forum"), self.stop("rail", "Esslingen (Neckar), Bahnhof", rail=True)]
+        self.assertIsNone(stops.town_station("Esslingen Neckar Forum", ranked))
+        self.assertIsNone(stops.town_station("Neckar", [self.stop("rail", "Oberndorf (Neckar), Bahnhof", rail=True)]))
+
+
+class NextDoorHouseTest(unittest.TestCase):
+    """A house number the timetable service does not know: the one with an "A" (Königstraße 1 -> 1A)."""
+
+    def setUp(self):
+        self.real = client.find_stops
+        self.asked = []
+
+        def fake(query):
+            self.asked.append(query)
+            return {"stopFinder": {"points": [{"anyType": "singlehouse", "type": "any", "name": "Stuttgart, Königstraße 1A",
+                                                "object": "Königstraße 1A", "quality": "990",
+                                                "ref": {"id": "1", "gid": "", "omc": "8111000", "place": "Stuttgart", "coords": "9.181200,48.783700"}}]}}
+        client.find_stops = fake
+
+    def tearDown(self):
+        client.find_stops = self.real
+
+    def test_the_house_next_door_is_asked_for(self):
+        places = [{"kind": "address", "name": "Stuttgart, Königstraße 9/1", "lat": 48.78, "lon": 9.18, "score": 0.9}]
+        found = stops.next_door_house("Königstraße 1, 70173 Stuttgart", places)
+        self.assertEqual(self.asked, ["Königstraße 1A Stuttgart"])
+        self.assertEqual([p["name"] for p in found], ["Stuttgart, Königstraße 1A"])
+        self.assertGreater(found[0]["score"], 0.9)
+
+    def test_nothing_when_the_house_itself_was_found(self):
+        places = [{"kind": "address", "name": "Stuttgart, Königstraße 1", "lat": 48.78, "lon": 9.18, "score": 0.9}]
+        self.assertEqual(stops.next_door_house("Königstraße 1 Stuttgart", places), [])
+        self.assertEqual(stops.next_door_house("Königstraße Stuttgart", places), [])
+        self.assertEqual(self.asked, [])

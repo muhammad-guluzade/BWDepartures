@@ -30,6 +30,13 @@ WITHOUT_BUSES = [0, 1, 2, 3, 4, 13, 14, 15, 16]   # trains, S-Bahn, U-Bahn / Sta
 RAIL_JOURNEYS = 4
 RAIL_ALTERNATIVES = 3
 RAIL_LATER_MINUTES = 60   # an alternative arrives at most this much after the latest connection found
+# ... and is left out when a connection of the first answer that leaves no earlier
+# arrives this much sooner, or when it walks much more than all of them (Ravensburg ->
+# Weingarten, 6 November 2026: a train and a 32-minute walk, 08:48, next to the
+# 07:53 bus arriving 08:05; DB Navigator shows no such thing)
+RAIL_BEATEN_MINUTES = 30
+RAIL_WALK_MINUTES = 20    # a walk this long ...
+RAIL_WALK_MORE = 10       # ... and this much longer than the longest walk of the first answer's connections
 # Connections that start a little before the time asked for are kept, as DB
 # Navigator does (asked 16:30, it also offers 16:27-16:29): a walk to the station
 # planned from 05:28 is still made at 05:30 by walking a little faster. Their
@@ -44,9 +51,18 @@ GONE_GRACE_MINUTES = 1    # the clocks of the phone and of the timetable can dif
 # to TWINS_MAX connections arriving at most TWIN_LATER_MINUTES after it are added
 # (the user's choice, option 2). Asked after the first answer (it needs it), and
 # only waited for TWIN_TIMEOUT seconds: twins are a bonus.
+# The same question also brings what DB Navigator shows next to a connection: the same
+# departure by another way, a little slower (6 November 2026: bus 44 next to the U6 at
+# Charlottenplatz; the direct tram 5 at 18:00 next to the faster tram + train from
+# Heidelberg Bismarckplatz). Without a change, the kind of transport of the only ride
+# is left out. Taken: arriving at most TWIN_LATER_MINUTES after the fastest, or leaving
+# within TWIN_DEPARTURE_MINUTES of it and arriving at most TWIN_SLOWER_MINUTES after it.
 ALL_CLASSES = [c for c in range(20) if c not in parse.EXCLUDED_CLASSES]
 TWINS_MAX = 2
 TWIN_LATER_MINUTES = 2
+TWIN_DEPARTURE_MINUTES = 10
+TWIN_SLOWER_MINUTES = 20
+TWIN_SLOWER_SHARE = 0.5   # ... and at most half the fastest connection's own duration (a 20-minute trip: 10)
 TWIN_TIMEOUT = 8
 # the two questions go to the planner at the same time
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="journeys")
@@ -176,6 +192,41 @@ def first_ride_leaves(journey: dict) -> str:
     return ride["from"].get("time") or ride["from"].get("planned") or ""
 
 
+def longest_walk(journey: dict) -> int:
+    return max((leg.get("minutes") or 0 for leg in journey["legs"] if leg["kind"] == "walk"), default=0)
+
+
+def worth_adding(alternative: dict, journeys: list) -> bool:
+    """Is a connection without buses worth showing next to the first answer's?
+    Not when one of those leaves no earlier and arrives much sooner, nor when it
+    walks much more than any of them (see RAIL_BEATEN_MINUTES)."""
+    dep, arr = alternative["departure"]["time"] or "", alternative["arrival"]["time"] or ""
+    if not dep or not arr:
+        return False
+    beaten = (datetime.strptime(arr, "%Y-%m-%dT%H:%M:%SZ") - timedelta(minutes=RAIL_BEATEN_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if any((j["departure"]["time"] or "") >= dep and (j["arrival"]["time"] or "9999") <= beaten for j in journeys):
+        return False
+    walk = longest_walk(alternative)
+    most = max((longest_walk(j) for j in journeys), default=0)
+    return not (walk >= RAIL_WALK_MINUTES and walk >= most + RAIL_WALK_MORE)
+
+
+WALK_ONLY_NEAR_MINUTES = 15
+
+
+def needless_walk(journey: dict, journeys: list) -> bool:
+    """A walk alone, when a ride leaving about as early arrives sooner (Charlottenplatz
+    -> Hauptbahnhof: 17 minutes on foot next to a U-Bahn of two minutes; DB Navigator
+    does not offer the walk then)."""
+    if any(leg["kind"] == "ride" for leg in journey["legs"]) or not journey["departure"]["time"]:
+        return False
+    at = lambda text: datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    leaves, arrives = at(journey["departure"]["time"]), journey["arrival"]["time"] or "9999"
+    return any(j is not journey and any(leg["kind"] == "ride" for leg in j["legs"]) and j["departure"]["time"]
+               and abs((at(j["departure"]["time"]) - leaves).total_seconds()) <= WALK_ONLY_NEAR_MINUTES * 60
+               and (j["arrival"]["time"] or "9999") < arrives for j in journeys)
+
+
 def in_time(journeys: list, start: datetime | None, arrive: bool) -> list:
     """The connections that fit the time asked for."""
     if arrive and start:
@@ -201,18 +252,35 @@ def twins(asked_from: str, asked_to: str, start: datetime | None, dticket: bool,
     change (see TWINS_MAX); [] when there is nothing to ask or no answer in time."""
     fastest = min(journeys, key=lambda j: j["arrival"]["time"] or "9999")
     classes = fastest.get("_classes") or []
-    if len(classes) < 2 or classes[1] is None or classes[1] == classes[0] or not fastest["arrival"]["time"]:
+    if not classes or not fastest["arrival"]["time"] or not fastest["departure"]["time"]:
         return []
-    allowed = [c for c in (DTICKET_CLASSES if dticket else ALL_CLASSES) if c != classes[1]]
+    if len(classes) == 1:
+        left_out = classes[0]          # no change: another kind of transport for the same trip
+    elif classes[1] is not None and classes[1] != classes[0]:
+        left_out = classes[1]          # the kind taken after the first change
+    else:
+        return []
+    allowed = [c for c in (DTICKET_CLASSES if dticket else ALL_CLASSES) if c != left_out]
+    if not allowed or left_out is None:
+        return []
     try:
         data = _pool.submit(client.get_journeys, asked_from, asked_to, start, False, allowed, RAIL_JOURNEYS).result(timeout=TWIN_TIMEOUT)
     except Exception:  # noqa: BLE001 -- no answer, or too late: the list goes without
         log.info("No twins for %s -> %s", asked_from, asked_to)
         return []
-    limit = (datetime.strptime(fastest["arrival"]["time"], "%Y-%m-%dT%H:%M:%SZ")
-             + timedelta(minutes=TWIN_LATER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    at = lambda text: datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    arrives, leaves = at(fastest["arrival"]["time"]), at(fastest["departure"]["time"])
+
+    def taken(j):
+        if not j["arrival"]["time"] or not j["departure"]["time"]:
+            return False
+        later = (at(j["arrival"]["time"]) - arrives).total_seconds() / 60
+        apart = abs((at(j["departure"]["time"]) - leaves).total_seconds()) / 60
+        slower = min(TWIN_SLOWER_MINUTES, TWIN_SLOWER_SHARE * (arrives - leaves).total_seconds() / 60)
+        return later <= TWIN_LATER_MINUTES or (apart <= TWIN_DEPARTURE_MINUTES and later < slower)
+
     found = [j for j in in_time(read_journeys(data, importance, dticket), start, False)
-             if j["id"] not in known and any(leg["kind"] == "ride" for leg in j["legs"]) and (j["arrival"]["time"] or "") <= limit]
+             if j["id"] not in known and any(leg["kind"] == "ride" for leg in j["legs"]) and taken(j)]
     return sorted(found, key=lambda j: j["arrival"]["time"] or "")[:TWINS_MAX]
 
 
@@ -242,10 +310,12 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
     limit = (datetime.strptime(latest, "%Y-%m-%dT%H:%M:%SZ") + timedelta(minutes=RAIL_LATER_MINUTES)).strftime("%Y-%m-%dT%H:%M:%SZ") if latest else ""
     # (a ride at least: a long walk is no alternative; not much later than the others)
     extra = [j for j in read_journeys(rail_data, importance, dticket) if j["id"] not in known
-             and any(leg["kind"] == "ride" for leg in j["legs"]) and (not limit or (j["arrival"]["time"] or "") <= limit)]
+             and any(leg["kind"] == "ride" for leg in j["legs"]) and (not limit or (j["arrival"]["time"] or "") <= limit)
+             and worth_adding(j, journeys)]
     # the ones arriving soonest; the list is put in order below
     journeys += sorted(extra, key=lambda j: j["arrival"]["time"] or "")[:RAIL_ALTERNATIVES]
     journeys = in_time(journeys, start, arrive)
+    journeys = [j for j in journeys if not needless_walk(j, journeys)]
     if journeys and not arrive:
         known = {j["id"] for j in journeys}
         journeys += twins(asked_from, asked_to, start, dticket, importance, journeys, known)

@@ -330,14 +330,34 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(sorted(map(tuple, lines)), [("U15", "ICE 569"), ("U15", "RE5")])   # the slower one is not a twin
         self.assertTrue(all("_classes" not in j for j in result["journeys"]))
 
-    def test_no_twins_asked_without_a_change_or_when_arriving_by(self):
+    def test_without_a_change_the_ride_s_kind_is_left_out_and_never_when_arriving_by(self):
+        # (since 6 November: bus 44 next to the U6 at Charlottenplatz, as DB Navigator)
         one_ride = journey(walk_minutes=0)
         one_ride["legs"] = one_ride["legs"][:1]
         self.answer = {"journeys": [one_ride]}
         journeys.plan(PRAG, ULM, start=LATER)
+        self.assertEqual(len(self.twin_asked), 1)
+        self.assertNotIn(3, self.twin_asked[0][4])            # the U15's kind (Stadtbahn) left out
+        self.twin_asked.clear()
         self.answer = {"journeys": [journey()]}
         journeys.plan(PRAG, ULM, start=LATER, arrive=True)
         self.assertEqual(self.twin_asked, [])
+
+    def test_the_same_departure_a_little_slower_is_added(self):
+        # the fastest leaves at(0) and arrives at(70); another way leaving at(5) and arriving at(85) is shown,
+        # one leaving at(30) and arriving at(85), or leaving at(5) and arriving at(100), is not
+        self.answer = {"journeys": [journey()]}
+        def other(leave, arrive):
+            j = journey(second=ICE)
+            first = j["legs"][0]["origin"]
+            first["departureTimePlanned"] = first["departureTimeEstimated"] = at(leave)
+            last = j["legs"][-1]["destination"]
+            last["arrivalTimePlanned"] = last["arrivalTimeEstimated"] = at(arrive)
+            j["legs"][0]["transportation"] = {**U15, "properties": {"tripCode": 2000 + leave + arrive}}
+            return j
+        self.twin_answer = {"journeys": [other(5, 85), other(30, 85), other(5, 100)]}
+        result = journeys.plan(PRAG, ULM, start=LATER)
+        self.assertEqual(sorted(j["departure"]["time"] for j in result["journeys"]), [at(0), at(5)])
 
     def test_twins_are_a_bonus(self):
         self.twin_answer = client.EfaError("down")
@@ -434,3 +454,39 @@ class JourneysApiTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorthAddingTest(unittest.TestCase):
+    """A connection without buses next to the first answer's (Ravensburg -> Weingarten, 6 November 2026)."""
+
+    @staticmethod
+    def conn(dep, arr, walks=()):
+        legs = [{"kind": "ride"}] + [{"kind": "walk", "minutes": m} for m in walks]
+        return {"departure": {"time": f"2026-11-06T{dep}:00Z"}, "arrival": {"time": f"2026-11-06T{arr}:00Z"}, "legs": legs}
+
+    def test_beaten_by_a_later_one_arriving_much_sooner(self):
+        bus = self.conn("06:53", "07:05")
+        self.assertFalse(journeys.worth_adding(self.conn("06:45", "07:48", walks=(32,)), [bus]))
+        self.assertFalse(journeys.worth_adding(self.conn("06:45", "07:40"), [bus]))           # 35 minutes later, without a walk too
+        self.assertTrue(journeys.worth_adding(self.conn("06:45", "07:20"), [bus]))            # 15 minutes later: an alternative
+        self.assertTrue(journeys.worth_adding(self.conn("07:00", "07:40"), [bus]))            # the bus leaves before it
+
+    def test_a_much_longer_walk_than_all_others(self):
+        others = [self.conn("05:00", "06:30", walks=(7,)), self.conn("05:30", "07:00", walks=(5,))]
+        self.assertFalse(journeys.worth_adding(self.conn("05:20", "06:20", walks=(25,)), others))
+        self.assertTrue(journeys.worth_adding(self.conn("05:20", "06:20", walks=(14,)), others))
+        self.assertTrue(journeys.worth_adding(self.conn("05:20", "06:20", walks=(25,)), others + [self.conn("05:10", "06:40", walks=(21,))]))
+
+
+class NeedlessWalkTest(unittest.TestCase):
+    @staticmethod
+    def conn(dep, arr, ride=True):
+        return {"departure": {"time": f"2026-11-06T{dep}:00Z"}, "arrival": {"time": f"2026-11-06T{arr}:00Z"},
+                "legs": [{"kind": "ride" if ride else "walk", "minutes": 17}]}
+
+    def test_a_walk_is_left_out_when_a_ride_about_as_early_arrives_sooner(self):
+        walk, u7 = self.conn("11:30", "11:47", ride=False), self.conn("11:31", "11:33")
+        self.assertTrue(journeys.needless_walk(walk, [walk, u7]))
+        self.assertFalse(journeys.needless_walk(u7, [walk, u7]))
+        self.assertFalse(journeys.needless_walk(walk, [walk, self.conn("11:31", "11:50")]))   # the ride arrives later
+        self.assertFalse(journeys.needless_walk(walk, [walk, self.conn("12:00", "12:02")]))   # it leaves half an hour later
