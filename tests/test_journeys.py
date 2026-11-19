@@ -231,8 +231,16 @@ class PlanTest(unittest.TestCase):
         self.twin_asked = []
         self.timetable_answer = {"journeys": []}
         self.timetable_asked = []
+        self.paced_answer = {"journeys": []}
+        self.paced_asked = []
 
-        def fake(origin, destination, start=None, arrive=False, classes=(), count=5, realtime=True):
+        def fake(origin, destination, start=None, arrive=False, classes=(), count=5, realtime=True, walk_speed=None):
+            # the same question at DB Navigator's walking pace (see at_db_pace())
+            if walk_speed:
+                self.paced_asked.append((origin, destination, start, arrive, tuple(classes), count, walk_speed))
+                if isinstance(self.paced_answer, Exception):
+                    raise self.paced_answer
+                return self.paced_answer
             # the timetable's own connections, as if nothing were late (see rescued())
             if not realtime:
                 self.timetable_asked.append((origin, destination, start, arrive, tuple(classes), count))
@@ -261,10 +269,22 @@ class PlanTest(unittest.TestCase):
         store.in_area = no_db
 
         self.real_live_ride = journeys.live_ride
+        # the departures of a connection's first stop (see later_starts()): none, unless a test gives some
+        self.real_get_departures = client.get_departures
+        self.departures_answer = client.EfaError("no network in the tests")
+        self.departures_asked = []
+
+        def fake_departures(stop_id, classes=(), limit=100, with_stops=True, ttl=0, start=None):
+            self.departures_asked.append((stop_id, tuple(classes), start))
+            if isinstance(self.departures_answer, Exception):
+                raise self.departures_answer
+            return self.departures_answer
+        client.get_departures = fake_departures
 
     def tearDown(self):
         client.get_journeys, departures.stop_importance, store.in_area, departures.outside_timetable = self.real
         journeys.live_ride = self.real_live_ride
+        client.get_departures = self.real_get_departures
 
     def test_stops_and_points(self):
         result = journeys.plan(PRAG, ULM)
@@ -577,6 +597,108 @@ class PlanTest(unittest.TestCase):
         broken["legs"][0]["origin"] = "nonsense"
         self.answer = {"journeys": [broken, journey()]}
         self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+
+    # --- DB Navigator's walking pace (see at_db_pace()) ---
+
+    def test_the_planner_is_also_asked_at_db_s_walking_pace(self):
+        journeys.plan(PRAG, ULM)
+        self.assertEqual([a[-1] for a in self.paced_asked], [client.WALK_SPEED_DB])
+        self.assertEqual(self.paced_asked[0][:4], self.asked[0][:4])
+
+    def test_the_db_pace_answer_s_shorter_walk_replaces_the_first_answer_s(self):
+        """Rosenackerweg 20 -> Favoritepark: 7 minutes for the planner, 6 for DB. The
+        same rides keep their changes' minimums; the walk and the start are DB's."""
+        self.answer = {"journeys": [self.shifted(0, walk_first=7)]}
+        self.paced_answer = {"journeys": [self.shifted(0, walk_first=6)]}
+        shown = journeys.plan(PRAG, ULM)["journeys"]
+        self.assertEqual(len(shown), 1)
+        self.assertEqual((shown[0]["legs"][0]["minutes"], shown[0]["departure"]["time"]), (6, at(-6)))
+        self.assertEqual(shown[0]["transfers"][0]["needed_minutes"], 10)
+
+    def test_a_db_pace_version_that_walks_longer_is_not_taken(self):
+        # (Heidelberg Hbf, 19 November 2026: 5 minutes to the bus where the first answer walked 3)
+        self.answer = {"journeys": [self.shifted(0, walk_first=3)]}
+        self.paced_answer = {"journeys": [self.shifted(0, walk_first=5)]}
+        self.assertEqual(journeys.plan(PRAG, ULM)["journeys"][0]["legs"][0]["minutes"], 3)
+
+    def test_db_pace_connections_the_first_answer_lacks_are_added_unless_beaten(self):
+        """The late S4 only DB's pace still catches: added. One that leaves no later
+        and arrives no sooner than a listed one: not."""
+        self.answer = {"journeys": [journey()]}
+        caught = journey(second=ICE)          # other rides, arriving at the same time ...
+        caught["legs"][0]["origin"]["departureTimePlanned"] = caught["legs"][0]["origin"]["departureTimeEstimated"] = at(1)
+        self.paced_answer = {"journeys": [caught]}
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 2)          # ... but leaving later: added
+        beaten = journey(second=ICE)
+        for end in ("departureTimePlanned", "departureTimeEstimated"):
+            beaten["legs"][0]["origin"][end] = at(-1)
+        self.paced_answer = {"journeys": [beaten]}
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+
+    def test_the_db_pace_answer_is_a_bonus(self):
+        self.paced_answer = client.EfaError("down")
+        self.assertEqual(len(journeys.plan(PRAG, ULM)["journeys"]), 1)
+
+    def test_a_connection_only_the_first_answer_has_walks_at_db_s_pace_where_known(self):
+        """The quick change came from the first answer (7-minute walk); the DB-pace
+        answer walked from the same address to the same stop in 6: that walk is used."""
+        quick = self.shifted(0, walk_first=7)
+        other = self.shifted(30, walk_first=6)          # other rides, the same walk to Pragfriedhof
+        self.answer = {"journeys": [quick]}
+        self.paced_answer = {"journeys": [other]}
+        shown = journeys.plan(PRAG, ULM)["journeys"]
+        first = next(j for j in shown if j["arrival"]["time"] == at(70))
+        self.assertEqual((first["legs"][0]["minutes"], first["departure"]["time"], first["arrival"]["time"]), (6, at(-6), at(70)))
+
+    # --- a later start that still makes the same change (see later_starts()) ---
+
+    def later_run(self, leaves, arrives, cancelled=False):
+        """A departure of the U15 from Pragfriedhof, as the stop's board has it."""
+        run = ride(U15, platform(PRAG, "Pragfriedhof", "1", [48.798, 9.182], departureTimePlanned=at(leaves), departureTimeEstimated=at(leaves)),
+                   platform("de:08111:6112", "Hauptbahnhof (A.-Klett-Platz)", "4", [48.783, 9.181],
+                            arrivalTimePlanned=at(arrives), arrivalTimeEstimated=at(arrives)))
+        event = parse.leg_as_event(run)
+        event["isCancelled"] = cancelled
+        return event
+
+    def test_a_later_run_of_the_first_line_that_still_makes_the_change_is_taken(self):
+        """Mühlhausen -> Favoritepark, 19 November 2026: U12 16:00 and 13 minutes at
+        Nordbahnhof, where the U12 16:10 makes the S4 by 3. The latest that makes it
+        with our 2 minutes is taken; one leaving 1 minute short of them is not, even
+        though the timetable would plan it (MEX18 at Stuttgart Hbf: 2 of 5 minutes)."""
+        self.answer = {"journeys": [journey(change_at=14, walk_minutes=0)]}     # U15 +0 -> +4, the train +14: 8 to spare
+        self.departures_answer = {"stopEvents": [self.later_run(5, 9), self.later_run(8, 12), self.later_run(9, 13),
+                                                 self.later_run(10, 14), self.later_run(1, 5, cancelled=True)]}
+        shown = journeys.plan(PRAG, ULM)["journeys"]
+        self.assertEqual(len(shown), 1)
+        u15, train = [leg for leg in shown[0]["legs"] if leg["kind"] == "ride"]
+        self.assertEqual((u15["from"]["time"], u15["from"]["planned"], u15["to"]["time"]), (at(8), at(8), at(12)))
+        self.assertEqual(u15["departure_id"], parse.departure_id(self.later_run(8, 12)))
+        self.assertEqual((train["from"]["time"], shown[0]["arrival"]["time"]), (at(14), at(70)))
+        self.assertEqual((shown[0]["departure"]["time"], shown[0]["transfers"][0]["spare_minutes"]), (at(8), 0))
+        self.assertEqual(self.departures_asked[0][0], PRAG)
+
+    def test_no_later_run_no_change(self):
+        self.answer = {"journeys": [journey(change_at=14, walk_minutes=0)]}
+        self.departures_answer = {"stopEvents": [self.later_run(11, 15), self.later_run(9, 13, cancelled=True)]}
+        self.assertEqual(journeys.plan(PRAG, ULM)["journeys"][0]["departure"]["time"], at(0))
+        # the stop's departures not to be had: as before
+        self.departures_answer = client.EfaError("down")
+        self.assertEqual(journeys.plan(PRAG, ULM)["journeys"][0]["departure"]["time"], at(0))
+
+    def test_later_runs_are_only_looked_for_when_the_change_waits(self):
+        self.answer = {"journeys": [journey(change_at=8, walk_minutes=0)]}      # 2 to spare
+        journeys.plan(PRAG, ULM)
+        self.assertEqual(self.departures_asked, [])
+
+    def test_a_walk_before_the_first_ride_moves_with_it(self):
+        self.answer = {"journeys": [self.shifted(0, walk_first=7)]}
+        self.answer["journeys"][0]["legs"][2]["duration"] = 120          # the walk at the change: 2 minutes
+        self.answer["journeys"][0]["legs"][2]["distance"] = 160
+        self.departures_answer = {"stopEvents": [self.later_run(6, 10)]}
+        shown = journeys.plan(PRAG, ULM)["journeys"][0]
+        walk_leg = shown["legs"][0]
+        self.assertEqual((walk_leg["from"]["planned"], walk_leg["to"]["planned"], shown["departure"]["time"]), (at(-1), at(6), at(-1)))
 
 
 class JourneysApiTest(unittest.TestCase):

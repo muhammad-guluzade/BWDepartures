@@ -953,6 +953,12 @@ def journey_line(line: str, transportation: dict) -> str:
 STAY_SEATED_CLASS = 97
 
 
+def journey_id(legs: list) -> str:
+    """A connection's id: its rides and walks, the same whichever answer it comes from."""
+    key = "|".join(leg.get("departure_id") or f"walk:{leg['minutes']}" for leg in legs)
+    return hashlib.sha1(key.encode()).hexdigest()[:16]
+
+
 def parse_journey(journey: dict, importance: dict | None = None) -> dict | None:
     """One connection: {id, departure, arrival, minutes, changes, dticket,
     legs: [...], transfers: [...]}. None if it can't be read."""
@@ -1002,9 +1008,8 @@ def parse_journey(journey: dict, importance: dict | None = None) -> dict | None:
     first, last = legs[0]["from"], legs[-1]["to"]
     departure = parse_time(first["time"])
     arrival = parse_time(last["time"])
-    key = "|".join(leg.get("departure_id") or f"walk:{leg['minutes']}" for leg in legs)
     return {
-        "id": hashlib.sha1(key.encode()).hexdigest()[:16],
+        "id": journey_id(legs),
         "departure": {"time": first["time"], "planned": first["planned"], "delay": first["delay"]},
         "arrival": {"time": last["time"], "planned": last["planned"], "delay": last["delay"]},
         "minutes": whole_minutes(arrival - departure) if arrival and departure else None,

@@ -420,6 +420,246 @@ def rescued(timetable_asked, journeys: list, latest: str, importance: dict, dtic
     return found
 
 
+def beaten_by(candidate: dict, journeys: list) -> bool:
+    """Does a listed connection leave no earlier and arrive no later?"""
+    leaves, arrives = candidate["departure"]["time"] or "", candidate["arrival"]["time"] or ""
+    return any(j is not candidate and (j["departure"]["time"] or "") >= leaves and (j["arrival"]["time"] or "9") <= arrives
+               for j in journeys)
+
+
+# ---------- DB Navigator's walking pace ----------
+# The planner walks 4.1 km/h, DB Navigator 4.7. Rosenackerweg 20 -> Aldinger
+# Str. 212, 19 November 2026, 05:35: the S4 was 9 minutes late, leaving
+# Favoritepark at 05:42, 540 m away: 7 minutes for the planner, too late, 6 for
+# DB Navigator, which offered S4 -> bus 533 -> walk, 06:33. The planner walks
+# that pace only with slower changes (efa/client.py WALK_SPEED_DB), so it is
+# asked once more at DB's pace, beside the first question. Its connections
+# replace the first answer's that have the same rides (their walks are then
+# DB's), and the ones the first answer lacks are added unless a listed one
+# leaves no earlier and arrives no later. The quick changes come from the
+# first answer as before; such a connection gets the walk to its first stop
+# and from its last one at DB's pace too, when the DB-pace answer walks there
+# (the same start and stop: Rosenackerweg 20 -> Favoritepark, 7 minutes
+# becomes 6).
+PACED_WAIT = 3   # seconds to wait for that answer once the first one is in (it usually comes with it)
+
+
+def at_db_pace(paced_asked, journeys: list, importance: dict, dticket: bool) -> tuple:
+    """(the first answer's connections with the DB-pace answer's merged in,
+    that answer's walks for paced_walk()); see above."""
+    if paced_asked is None:
+        return journeys, {}
+    try:
+        paced = read_journeys(paced_asked.result(timeout=PACED_WAIT), importance, dticket)
+    except Exception:  # noqa: BLE001 -- no answer, or too late: the first answer is shown alone
+        return journeys, {}
+    by_rides = {}
+    for j in paced:
+        by_rides.setdefault(rides(j), j)
+    merged = [same_rides_paced(j, by_rides.pop(rides(j), None)) for j in journeys]
+    for j in by_rides.values():
+        if not beaten_by(j, merged):
+            merged.append(j)
+    return merged, end_walks(paced)
+
+
+def same_rides_paced(journey: dict, paced: dict | None) -> dict:
+    """The DB-pace answer's version of a connection (the same rides) when it
+    leaves no earlier and arrives no later: at the slower changes' pace the
+    planner sometimes walks a minute more to the same stop (19 November 2026,
+    Heidelberg Hbf: 5 minutes to the 713 instead of 3). The changes keep the
+    first answer's minimums; the slower pace also stretches the walks inside
+    stations (Stuttgart Hbf: 5 minutes instead of 3)."""
+    if not paced:
+        return journey
+    if ((paced["departure"]["time"] or "") < (journey["departure"]["time"] or "")
+            or (paced["arrival"]["time"] or "9") > (journey["arrival"]["time"] or "9")):
+        return journey
+    transfers = parse.transfers_of(paced["legs"], needed_given=[t["needed_minutes"] for t in journey.get("transfers") or []])
+    if not all(t["possible"] for t in transfers):
+        return journey
+    return {**paced, "transfers": transfers}
+
+
+def end_walks(journeys: list) -> dict:
+    """The walks to a connection's first stop and from its last one:
+    {("first" | "last", stop id): walk leg}."""
+    walks = {}
+    for j in journeys:
+        legs = j["legs"]
+        if len(legs) >= 2 and legs[0]["kind"] == "walk" and legs[1]["kind"] == "ride":
+            walks.setdefault(("first", legs[1]["from"]["id"]), legs[0])
+        if len(legs) >= 2 and legs[-1]["kind"] == "walk" and legs[-2]["kind"] == "ride":
+            walks.setdefault(("last", legs[-2]["to"]["id"]), legs[-1])
+    return walks
+
+
+def paced_walk(journey: dict, walks: dict) -> dict:
+    """The connection with its first and last walk at DB's pace, where the
+    DB-pace answer has walked the same way (see above)."""
+    legs = list(journey["legs"])
+    changed = False
+    for end, walk_at, ride_at in (("first", 0, 1), ("last", -1, -2)):
+        if len(legs) < 2 or legs[walk_at]["kind"] != "walk" or legs[ride_at]["kind"] != "ride":
+            continue
+        stop = legs[ride_at]["from" if end == "first" else "to"]["id"]
+        paced, walk = walks.get((end, stop)), legs[walk_at]
+        if not paced or not paced["minutes"] or paced["minutes"] >= walk["minutes"]:
+            continue
+        # the first walk starts later, the last one ends sooner; the ride stays
+        seconds = (walk["minutes"] - paced["minutes"]) * 60 * (1 if end == "first" else -1)
+        moved_end = "from" if end == "first" else "to"
+        legs[walk_at] = {**walk, "minutes": paced["minutes"], "metres": paced.get("metres") or walk.get("metres"),
+                         "path": paced.get("path") or walk.get("path"),
+                         moved_end: shifted(walk[moved_end], seconds, seconds)}
+        changed = True
+    if not changed:
+        return journey
+    start, end_place = legs[0]["from"], legs[-1]["to"]
+    leaves, arrives = parse.parse_time(start["time"]), parse.parse_time(end_place["time"])
+    return {**journey, "id": parse.journey_id(legs), "legs": legs,
+            "departure": {"time": start["time"], "planned": start["planned"], "delay": start.get("delay")},
+            "arrival": {"time": end_place["time"], "planned": end_place["planned"], "delay": end_place.get("delay")},
+            "minutes": parse.whole_minutes(arrives - leaves) if leaves and arrives else journey.get("minutes")}
+
+
+# ---------- a later start that still makes the same change ----------
+# The planner has its own minimum time for a change at each stop, at some
+# longer than ours: Mühlhausen -> Favoritepark, 19 November 2026, the U12 at
+# 16:10 reaches Nordbahnhof at 16:23 and the S4 leaves at 16:26; the planner
+# wants more than 3 minutes there, so it offered the U12 at 16:00 and 13
+# minutes of waiting. DB Navigator offered the 16:10, and by our own rule
+# (parse.change_possible) the change works. So when a connection waits at its
+# first change, the later runs of its first line from the same stop are looked
+# at, and the latest one that still makes the change takes its place.
+LATER_START_SPARE = 3   # minutes to spare at the first change before later runs are looked for
+LATER_START_WAIT = 5    # seconds for the departures of the first stops
+
+
+def shifted(place: dict, seconds: float, planned_seconds: float) -> dict:
+    """A walk's end moved with its ride to a later run: planned time too."""
+    moved_place = dict(place)
+    for field, by in (("time", seconds), ("planned", planned_seconds)):
+        when = parse.parse_time(place.get(field))
+        if when and by:
+            moved_place[field] = parse.iso(when + timedelta(seconds=by))
+    return moved_place
+
+
+def with_first_ride(journey: dict, trip: dict) -> dict | None:
+    """The connection with its first ride replaced by another run of the same
+    line (`trip`, parse.parse_trip), or None when that run cannot be taken or
+    a change can no longer be made."""
+    legs = [dict(leg) for leg in journey["legs"]]
+    ride_at = [i for i, leg in enumerate(legs) if leg["kind"] == "ride"]
+    if len(ride_at) < 2:
+        return None
+    first = ride_at[0]
+    leg, here = legs[first], trip["here"]
+    station = lambda stop_id: ":".join((stop_id or "").split(":")[:3])
+    off = (next((stop for stop in trip["onward"] if stop["id"] == leg["to"]["id"]), None)
+           or next((stop for stop in trip["onward"] if station(stop["id"]) == station(leg["to"]["id"])), None))
+    if not off or here.get("cancelled") or off.get("cancelled") or not here.get("time") or not off.get("time"):
+        return None
+    took = lambda place, stop: {**place, "time": stop["time"], "planned": stop["planned"], "delay": stop.get("delay"),
+                                "realtime": bool(stop.get("realtime")), "cancelled": bool(stop.get("cancelled"))}
+    seconds = lambda new, old, field: ((parse.parse_time(new.get(field)) - parse.parse_time(old.get(field))).total_seconds()
+                                       if parse.parse_time(new.get(field)) and parse.parse_time(old.get(field)) else 0)
+    leaving = (seconds(here, leg["from"], "time"), seconds(here, leg["from"], "planned"))
+    arriving = (seconds(off, leg["to"], "time"), seconds(off, leg["to"], "planned"))
+    ahead = {stop["id"]: stop for stop in trip["onward"]}
+    legs[first] = {**leg, "departure_id": trip["id"], "from": took(leg["from"], here), "to": took(leg["to"], off),
+                   "stops": [took(stop, ahead[stop["id"]]) if stop["id"] in ahead and ahead[stop["id"]].get("time") else stop
+                             for stop in leg.get("stops") or []]}
+    for i, walk in enumerate(legs):
+        if walk["kind"] == "walk" and i < ride_at[1]:
+            by = leaving if i < first else arriving
+            legs[i] = {**walk, "from": shifted(walk["from"], *by), "to": shifted(walk["to"], *by)}
+    transfers = parse.transfers_of(legs, needed_given=[t["needed_minutes"] for t in journey.get("transfers") or []])
+    # (the change we make up ourselves gets its whole minimum: "the timetable plans
+    # it shorter" holds for the planner's own changes only)
+    if not all(t["possible"] for t in transfers) or (transfers[0]["spare_minutes"] or 0) < 0:
+        return None
+    start, end = legs[0]["from"], legs[-1]["to"]
+    leaves, arrives = parse.parse_time(start["time"]), parse.parse_time(end["time"])
+    return {**journey, "id": parse.journey_id(legs), "legs": legs, "transfers": transfers,
+            "departure": {"time": start["time"], "planned": start["planned"], "delay": start.get("delay")},
+            "arrival": {"time": end["time"], "planned": end["planned"], "delay": end.get("delay")},
+            "minutes": parse.whole_minutes(arrives - leaves) if leaves and arrives else journey.get("minutes")}
+
+
+def waits_at_first_change(journey: dict) -> bool:
+    ride_legs = [leg for leg in journey["legs"] if leg["kind"] == "ride"]
+    transfers = journey.get("transfers") or []
+    return (len(ride_legs) >= 2 and bool(ride_legs[0].get("board_stop")) and bool(transfers)
+            and (transfers[0].get("spare_minutes") or 0) >= LATER_START_SPARE)
+
+
+def later_runs(journey: dict, data: dict) -> list:
+    """The later runs of the first ride's line from the same stop that leave
+    before the next ride does, latest first, as parse.parse_trip() trips."""
+    ride_legs = [leg for leg in journey["legs"] if leg["kind"] == "ride"]
+    leg, next_leg = ride_legs[0], ride_legs[1]
+    wanted = parse.decode_departure_id(leg["departure_id"])
+    if not wanted:
+        return []
+    leaves, last = leg["from"]["time"] or "", next_leg["from"]["time"] or ""
+    station = lambda platform_id: ":".join(platform_id.split(":")[:3])
+    found = []
+    for event in data.get("stopEvents") or []:
+        try:
+            other = parse.decode_departure_id(parse.departure_id(event))
+            if (not other or other["line_id"] != wanted["line_id"] or station(other["platform_id"]) != station(wanted["platform_id"])
+                    or other["planned"] <= wanted["planned"] or parse.is_excluded(event)):
+                continue
+            trip = parse.parse_trip(event)
+            if leaves < (trip["here"]["time"] or "") < last:
+                found.append(trip)
+        except Exception:  # noqa: BLE001 -- an unreadable departure is no candidate
+            continue
+    return sorted(found, key=lambda t: t["here"]["time"], reverse=True)
+
+
+def later_starts(journeys: list) -> list:
+    """The connections, each one that waits at its first change replaced by
+    the same with a later run of its first line, when one still makes the
+    change (see above)."""
+    waiting = [j for j in journeys if waits_at_first_change(j)]
+    if not waiting:
+        return journeys
+    asked = {}
+    for j in waiting:
+        leg = next(leg for leg in j["legs"] if leg["kind"] == "ride")
+        classes = tuple(c for c in (j.get("_classes") or [None])[:1] if c is not None)
+        key = (leg["board_stop"], classes)
+        start = parse.parse_time(leg["from"]["time"])
+        if key not in asked and start:
+            asked[key] = _pool.submit(client.get_departures, leg["board_stop"], classes, start=start - timedelta(minutes=1))
+    done, _ = wait(list(asked.values()), timeout=LATER_START_WAIT)
+    result, taken, looked_at = [], 0, {id(j) for j in waiting}
+    listed = {rides(j) for j in journeys}
+    for j in journeys:
+        if id(j) not in looked_at:
+            result.append(j)
+            continue
+        leg = next(leg for leg in j["legs"] if leg["kind"] == "ride")
+        classes = tuple(c for c in (j.get("_classes") or [None])[:1] if c is not None)
+        answer = asked.get((leg["board_stop"], classes))
+        later = None
+        if answer in done and not answer.exception():
+            for trip in later_runs(j, answer.result()):
+                later = with_first_ride(j, trip)
+                if later:
+                    break
+        if later and rides(later) in listed:
+            continue     # the later run is listed already as a connection of its own: this earlier one goes
+        result.append(later or j)
+        taken += bool(later)
+    if taken:
+        log.info("%d connection(s) start later with the same change", taken)
+    return result
+
+
 def plan(origin: str, destination: str, start: datetime | None = None, arrive: bool = False, dticket: bool = False) -> dict:
     """{from, to, when, arrive, dticket, journeys: [...], empty}. `start` is
     a UTC moment (None: now): the departure, or with `arrive` the latest
@@ -432,6 +672,9 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
     # (the timetable's own connections: see rescued())
     timetable_asked = (_pool.submit(client.get_journeys, asked_from, asked_to, start, arrive, main_classes, main_count, realtime=False)
                        if live_matters(start) else None)
+    # (at DB Navigator's walking pace: see at_db_pace())
+    paced_asked = _pool.submit(client.get_journeys, asked_from, asked_to, start, arrive, main_classes, main_count,
+                               walk_speed=client.WALK_SPEED_DB)
     data = client.get_journeys(asked_from, asked_to, start, arrive, main_classes, main_count)
     try:
         rail_data = rail_asked.result()
@@ -443,7 +686,7 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
         if asked["kind"] == "place" and town_in_bw(data, end) is False:
             raise InvalidPlace(f"{which} is outside Baden-Württemberg")
     importance = departures.stop_importance()
-    journeys = read_journeys(data, importance, dticket)
+    journeys, walks = at_db_pace(paced_asked, read_journeys(data, importance, dticket), importance, dticket)
     known = {j["id"] for j in journeys} | {rides(j) for j in journeys}
     latest_departure = max((j["departure"]["planned"] or "" for j in journeys), default="")
     latest = max((j["arrival"]["time"] or "" for j in journeys), default="")
@@ -455,11 +698,13 @@ def plan(origin: str, destination: str, start: datetime | None = None, arrive: b
     # the ones arriving soonest; the list is put in order below
     journeys += sorted(extra, key=lambda j: j["arrival"]["time"] or "")[:RAIL_ALTERNATIVES]
     journeys += rescued(timetable_asked, journeys, latest_departure, importance, dticket)
+    # (before the time filter: a connection leaving a little too early can start later)
+    journeys = later_starts([paced_walk(j, walks) for j in journeys])
     journeys = in_time(journeys, start, arrive)
     journeys = [j for j in journeys if not needless_walk(j, journeys)]
     if journeys and not arrive:
         known = {j["id"] for j in journeys} | {rides(j) for j in journeys}
-        journeys += twins(asked_from, asked_to, start, dticket, importance, journeys, known)
+        journeys += [paced_walk(j, walks) for j in twins(asked_from, asked_to, start, dticket, importance, journeys, known)]
     for journey in journeys:
         journey.pop("_classes", None)
     journeys.sort(key=lambda j: (j["departure"]["time"] or "", j["arrival"]["time"] or ""))

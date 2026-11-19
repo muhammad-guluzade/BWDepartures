@@ -609,6 +609,19 @@ about an hour before and three hours after now it is also asked by the timetable
 with a change that only that answer has is checked with its rides' live times and offered when
 every change can still be made by the rule of `transfers` below.
 
+Walks are at DB Navigator's pace (about 4.7 km/h) where the planner has one: it is asked once more
+with that walking pace, which it only gives together with slower changes. That answer's version of
+a connection (the same rides) is taken when it leaves no earlier and arrives no later, keeping the
+first answer's change minimums; its connections the first answer lacks (a late train only a
+brisker walk still reaches) are added unless a listed one leaves no earlier and arrives no later;
+the walk to the first stop and from the last one of the other connections is taken from it where it
+walked the same way.
+
+The planner also has its own minimum time for some changes, longer than the rule of `transfers`
+(3 minutes from the U12 to the S4 at Nordbahnhof are too few for it). When a connection waits at
+its first change, the later runs of its first line from the same stop are looked at, and the
+latest one that still makes that change with its whole `needed_minutes` takes its place.
+
 Connections that left before `when` (or now) are left out, and with `arrive`
 those arriving after `when`; flights and on-demand services are never
 offered. Example (shortened to one connection; times in UTC):
@@ -664,7 +677,7 @@ offered. Example (shortened to one connection; times in UTC):
 | Field | |
 |---|---|
 | `from`, `to` | The places asked for: `kind` `"stop"` (with `id`) or `"place"` (a point; `id` null), `lat`, `lon`, and `name` as the journey planner names it (for a point: the address there); `name` is null when nothing was found. |
-| `journeys` | The connections, by departure. They are planned for a traveller who changes briskly (the timetable service's "fast" change times, as DB Navigator offers): a change of a few minutes between platforms counts as possible; each walk says its minutes and metres. Walks to the first stop and from the last stop are at normal speed. `departure` / `arrival`: `time` (live when known), `planned`, `delay` (minutes). `minutes`: door to door. `changes`: rides minus one. `dticket`: every ride is valid with the Deutschlandticket. |
+| `journeys` | The connections, by departure. They are planned for a traveller who changes briskly (the timetable service's "fast" change times, as DB Navigator offers): a change of a few minutes between platforms counts as possible; each walk says its minutes and metres. Walks to the first stop and from the last stop are at DB Navigator's pace where the planner gives it (see above). `departure` / `arrival`: `time` (live when known), `planned`, `delay` (minutes). `minutes`: door to door. `changes`: rides minus one. `dticket`: every ride is valid with the Deutschlandticket. |
 | `legs` | In travel order. A `"ride"` has `line`, `mode` (as on the boards; regional and long-distance trains are one mode, `trains`), `brand`, `destination` (on the vehicle's sign), `dticket`, `replacement`, `from` / `to` (stops as in a departure's stop list, with `platform`, live `time`), `stops` (the ones in between), `path` (`[lat, lon]` points to draw, simplified to about 10 m), `notices` (the operators' messages: `title`, plain-text `text`, `priority` `"normal"`, `"high"` or `"veryHigh"`; texts as the operators write them, mostly German). A `"walk"` has `minutes`, `metres`, `from`, `to`, `path`. |
 | `departure_id`, `board_stop` | The same ride on the departure board of the stop it leaves from: `GET /api/v1/stops/{board_stop}/departures/{departure_id}/stops` gives its live times, its live arrival at every stop ahead, and whether it is cancelled. That is how a client follows a connection. `board_stop` is null for a ride starting outside Baden-Württemberg. |
 | `transfers` | One per change: `at` (where the ride ends), `to` (where the next starts), `walk_minutes` (null: no walk), `needed_minutes` (a walk to another stop: its minutes, 2 at least; the same platform of the same stop: 0; else the planner's walk inside the station: 0 when it says 0 seconds (an island platform), else its minutes, 2 at least; else 2), `spare_minutes` (left over with the times given, to the second and rounded down; can be negative), `possible` (the next ride does not leave first, and the change keeps `needed_minutes` or no less than the timetable plans: a bus planned 1 minute after a tram stays possible until delays shorten that minute). |

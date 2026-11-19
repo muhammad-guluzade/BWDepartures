@@ -230,17 +230,26 @@ JOURNEYS_TTL = 30
 # Navigator does; the walking minutes are shown, so the traveller can judge.
 # The walk to the first stop and from the last one stays at normal speed.
 CHANGE_SPEED = "fast"
+# DB Navigator's walking pace: 1,791 m in 23 minutes, 4.7 km/h (19 November 2026);
+# the planner's own is 4.1 km/h. A different pace is asked for with
+# itOptionsActive=1 and changeSpeed = a percentage of the planner's normal
+# walking times, and that one number then sets the time for changing too:
+# at 80 the planner walks DB's pace (1,830 m in 23 minutes) but refuses quick
+# changes "fast" allows (Nordbahnhof S4 -> U12 in 4 minutes). So journeys are
+# asked both ways (services/journeys.py).
+WALK_SPEED_DB = "80"
 
 
 def get_journeys(origin: str, destination: str, start: datetime | None = None, arrive: bool = False,
-                 classes=(), count: int = 5, realtime: bool = True) -> dict:
+                 classes=(), count: int = 5, realtime: bool = True, walk_speed: str | None = None) -> dict:
     """Raw journey-planner response: connections from `origin` to
     `destination`, each a stop id ("de:08111:115") or a point
     ("lat,lon" already turned into EFA's "lon:lat:WGS84[dd.ddddd]" by the
     caller, see `place_param`). `start` (UTC; None: now) is the departure,
     or with `arrive` the latest arrival. `classes`: only these product
     classes (the D-Ticket switch). `realtime` False: by the timetable alone,
-    as if nothing were late."""
+    as if nothing were late. `walk_speed`: the pace of walking and changing
+    together (see WALK_SPEED_DB); without it changes are "fast", walks normal."""
     params = {
         "outputFormat": "rapidJSON",
         "coordOutputFormat": "WGS84[dd.ddddd]",
@@ -255,7 +264,10 @@ def get_journeys(origin: str, destination: str, start: datetime | None = None, a
         local = to_local(start)  # EFA takes the time in German local time
         params.update({"itdDate": local.strftime("%Y%m%d"), "itdTime": local.strftime("%H%M")})
     params["itdTripDateTimeDepArr"] = "arr" if arrive else "dep"
-    params["changeSpeed"] = CHANGE_SPEED
+    if walk_speed:
+        params.update({"itOptionsActive": 1, "changeSpeed": walk_speed})
+    else:
+        params["changeSpeed"] = CHANGE_SPEED
     if classes:
         params["includedMeans"] = "checkbox"
         for cls in classes:

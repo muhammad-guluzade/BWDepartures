@@ -228,6 +228,13 @@ class SlowPlannerTest(unittest.TestCase):
         self.assertEqual(sent[0]["changeSpeed"], "fast")
         self.assertNotIn("itOptionsActive", sent[0])   # the walks to and from the stops keep their normal speed
 
+    def test_journeys_at_db_navigator_s_walking_pace(self):
+        # (one number for walking and changing: 80 = DB's 4.7 km/h, measured 19 November 2026)
+        sent = []
+        client._session.get = lambda url, params=None, timeout=None: (sent.append(params), self.Answer(200))[1]
+        client.get_journeys("de:08111:115", "de:08415:22006", walk_speed=client.WALK_SPEED_DB)
+        self.assertEqual((sent[0]["changeSpeed"], sent[0]["itOptionsActive"]), ("80", 1))
+
     def test_two_failures_are_an_error(self):
         self.codes = [502, 502]
         with self.assertRaises(client.EfaError):
