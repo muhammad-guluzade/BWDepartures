@@ -234,7 +234,13 @@ class PlanTest(unittest.TestCase):
         self.paced_answer = {"journeys": []}
         self.paced_asked = []
 
+        self.onward_answer = None          # the question from a train's stop (see onward_from())
+        self.onward_asked = []
+
         def fake(origin, destination, start=None, arrive=False, classes=(), count=5, realtime=True, walk_speed=None):
+            if self.onward_answer is not None and origin == PRAG and not walk_speed and realtime:
+                self.onward_asked.append((origin, destination, start))
+                return self.onward_answer
             # the same question at DB Navigator's walking pace (see at_db_pace())
             if walk_speed:
                 self.paced_asked.append((origin, destination, start, arrive, tuple(classes), count, walk_speed))
@@ -649,6 +655,32 @@ class PlanTest(unittest.TestCase):
         shown = journeys.plan(PRAG, ULM)["journeys"]
         first = next(j for j in shown if j["arrival"]["time"] == at(70))
         self.assertEqual((first["legs"][0]["minutes"], first["departure"]["time"], first["arrival"]["time"]), (6, at(-6), at(70)))
+
+    def test_on_from_a_train_only_db_s_pace_reaches_with_the_quick_changes(self):
+        """19 November 2026, 05:35: the late S4 is out of reach at the planner's pace;
+        at DB's it is reached, but that answer goes on with its slower changes. Asked
+        again from the S4's stop, with the quick ones, the faster way on comes too,
+        with the walk in front."""
+        home = "48.9, 9.17"
+        self.answer = {"journeys": [self.shifted(30, walk_first=7)]}            # the planner's pace: only a later U15
+        self.paced_answer = {"journeys": [self.shifted(0, walk_first=6)]}       # DB's pace: this U15, then the slow way on
+        quick = journey(second=ICE, change_at=14)                               # from its stop, quick changes: the ICE
+        for end in ("arrivalTimePlanned", "arrivalTimeEstimated"):
+            quick["legs"][-1]["destination"][end] = at(50)
+        self.onward_answer = {"journeys": [quick]}
+        shown = journeys.plan(home, ULM)["journeys"]
+        self.assertEqual([(a[0], a[2].strftime("%Y-%m-%dT%H:%M:%SZ")) for a in self.onward_asked], [(PRAG, at(-1))])
+        fast = next(j for j in shown if j["arrival"]["time"] == at(50))
+        self.assertEqual(([leg["kind"] for leg in fast["legs"]], fast["legs"][0]["minutes"], fast["departure"]["time"]),
+                         (["walk", "ride", "walk", "ride"], 6, at(-6)))
+        self.assertEqual(fast["legs"][-1]["line"], "ICE 569")
+
+    def test_no_second_question_when_the_planner_s_pace_reaches_the_train_too(self):
+        self.answer = {"journeys": [self.shifted(0, walk_first=7)]}
+        self.paced_answer = {"journeys": [self.shifted(0, walk_first=6)]}
+        self.onward_answer = {"journeys": []}
+        journeys.plan("48.9, 9.17", ULM)
+        self.assertEqual(self.onward_asked, [])
 
     # --- a later start that still makes the same change (see later_starts()) ---
 

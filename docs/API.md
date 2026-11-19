@@ -616,6 +616,9 @@ first answer's change minimums; its connections the first answer lacks (a late t
 brisker walk still reaches) are added unless a listed one leaves no earlier and arrives no later;
 the walk to the first stop and from the last one of the other connections is taken from it where it
 walked the same way.
+When it walks to a train none of the first answer's connections take (a late train only that pace
+still reaches), the planner is asked again from that train's stop with the quick changes, and the
+walk is put in front of what it finds.
 
 The planner also has its own minimum time for some changes, longer than the rule of `transfers`
 (3 minutes from the U12 to the S4 at Nordbahnhof are too few for it). When a connection waits at
