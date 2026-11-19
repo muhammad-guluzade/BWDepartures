@@ -45,9 +45,10 @@ PLATFORM_WORD = re.compile(r"^(Gleis|Bstg\.?|Pos\.?|Steig|Bussteig|Bahnsteig|Mas
 # GTFS route_type -> our coarse kind. Basic codes (0 tram/S-Bahn/U-Bahn, 1 metro,
 # 2 rail, 3 bus), and since NVBW's release of 14 Nov 2026 the extended codes
 # (100-117 rail, 109 S-Bahn, 200-209 coach, 400-405 urban rail, 700-716 bus,
-# 900-906 tram and Stadtbahn). Everything else (ferry, cable car, taxi) is "other".
+# 900-906 tram and Stadtbahn). Everything else (tourist railways (107), ferry, cable car, taxi) is "other".
 KIND_OF_ROUTE_TYPE = {"2": "rail", "0": "urban_rail", "1": "urban_rail", "3": "bus"}
 EXTENDED_KINDS = (  # (lowest, highest, kind); checked in this order
+    (107, 107, "other"), # added touritst railways (107)
     (109, 109, "urban_rail"),   # S-Bahn, before the rail range it sits in
     (100, 117, "rail"),
     (200, 209, "bus"),
