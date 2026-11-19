@@ -1077,6 +1077,15 @@ class AreaApiTest(StopsDbTestCase):
         self.assertIsNone(index.get_json()["stop_data"])
         self.assertEqual(self.http.get("/").status_code, 200)
 
+class RouteTypeTest(unittest.TestCase):
+    def test_basic_and_extended_codes(self):
+        cases = {"2": "rail", "0": "urban_rail", "3": "bus",        # old file
+                 "100": "rail", "106": "rail", "109": "urban_rail",  # new file
+                 "900": "urban_rail", "901": "urban_rail",
+                 "700": "bus", "704": "bus", "714": "bus", "200": "bus",
+                 "1000": "other", "1501": "other", "x": "other"}
+        for code, kind in cases.items():
+            self.assertEqual(importer.kind_of(code), kind, code)
 
 if __name__ == "__main__":
     unittest.main()

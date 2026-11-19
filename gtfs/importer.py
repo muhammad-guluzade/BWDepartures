@@ -42,9 +42,33 @@ PLATFORM_SUFFIX = re.compile(r"\s+(Gleis|Bstg\.?|Pos\.?|Steig|Bussteig|Bahnsteig
 # the number on the sign without its word: "Bstg 15" -> "15", "Gleis 2(U)" -> "2(U)"
 PLATFORM_WORD = re.compile(r"^(Gleis|Bstg\.?|Pos\.?|Steig|Bussteig|Bahnsteig|Mast)\s*", re.IGNORECASE)
 
-# GTFS route_type -> our coarse kind. NVBW codes S-Bahn, U-Bahn and tram
-# all as 0, so the file can't tell those apart.
+# GTFS route_type -> our coarse kind. Basic codes (0 tram/S-Bahn/U-Bahn, 1 metro,
+# 2 rail, 3 bus), and since NVBW's release of 14 Nov 2026 the extended codes
+# (100-117 rail, 109 S-Bahn, 200-209 coach, 400-405 urban rail, 700-716 bus,
+# 900-906 tram and Stadtbahn). Everything else (ferry, cable car, taxi) is "other".
 KIND_OF_ROUTE_TYPE = {"2": "rail", "0": "urban_rail", "1": "urban_rail", "3": "bus"}
+EXTENDED_KINDS = (  # (lowest, highest, kind); checked in this order
+    (109, 109, "urban_rail"),   # S-Bahn, before the rail range it sits in
+    (100, 117, "rail"),
+    (200, 209, "bus"),
+    (400, 405, "urban_rail"),
+    (700, 716, "bus"),
+    (900, 906, "urban_rail"),
+)
+
+
+def kind_of(route_type: str) -> str:
+    """Our coarse kind for a basic or extended GTFS route_type."""
+    if route_type in KIND_OF_ROUTE_TYPE:
+        return KIND_OF_ROUTE_TYPE[route_type]
+    try:
+        code = int(route_type)
+    except ValueError:
+        return "other"
+    for low, high, kind in EXTENDED_KINDS:
+        if low <= code <= high:
+            return kind
+    return "other"
 KINDS = ("rail", "urban_rail", "bus", "other")
 
 # Urban rail is one route_type in the file; the line names tell the kinds
@@ -159,7 +183,7 @@ def is_real_name(name: str) -> bool:
 
 def route_kind(route_type: str, short_name: str, long_name: str) -> str:
     """rail / urban_rail / bus / other for one route of the file."""
-    kind = KIND_OF_ROUTE_TYPE.get(route_type, "other")
+    kind = kind_of(route_type)
     if kind == "rail":
         if REPLACEMENT_NAME.search(short_name) or (not short_name.strip() and BUS_PLACE.search(long_name)):
             return "bus"  # a rail replacement bus
